@@ -26,7 +26,7 @@ from airflow.traces.tracer import Trace
 
 from pprint import pformat
 
-logger = logging.getLogger("airflow.otel_test_dag")
+logger = logging.getLogger("airflow.otel_template_dag")
 _REQUESTS_INSTRUMENTED = False
 
 
@@ -212,4 +212,4 @@ def otel_template_dag():
     chain(task1(), task2(), task3())
 
 
-otel_test_dag()
+otel_template_dag()
