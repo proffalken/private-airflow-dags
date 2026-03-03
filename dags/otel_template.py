@@ -208,7 +208,7 @@ def task3(ti):
     start_date=pendulum.datetime(2025, 8, 30, tz="UTC"),
     catchup=False,
 )
-def otel_test_dag():
+def otel_template_dag():
     chain(task1(), task2(), task3())
 
 
