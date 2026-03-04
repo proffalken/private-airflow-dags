@@ -10,6 +10,7 @@ import pendulum
 
 import requests
 import random
+import json
 
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry import trace
@@ -164,17 +165,33 @@ def get_saved_posts(ti):
                                # print(f"ID: {item.id}")
                                # print(f"Sub: {item.subreddit}")
                                # print("-" * 50)
+
+                                item_object = {
+                                       "type": "post",
+                                       "title": item.title,
+                                       "uri": item.url
+                                       }
                                 if item.subreddit in sorted_posts:
-                                    sorted_posts[item.subreddit].append(item)
+                                    sorted_posts[item.subreddit].append(item_object)
                                 else:
                                     sorted_posts[item.subreddit] = []
-                                    sorted_posts[item.subreddit].append(item)
+                                    sorted_posts[item.subreddit].append(item_object)
                             else:
                                 print(f"Comment: {item.body}")
                                 print(f"ID: {item.id}")
                                 print("-" * 50)
+                                item_object = {
+                                       "type": "comment",
+                                       "title": item.title,
+                                       "uri": item.url
+                                       }
+                                if item.subreddit in sorted_posts:
+                                    sorted_posts[item.subreddit].append(item_object)
+                                else:
+                                    sorted_posts[item.subreddit] = []
+                                    sorted_posts[item.subreddit].append(item_object)
 
-                        print(sorted_posts)
+                        print(json.dumps(sorted_posts))
 
 #                    tracer = trace.get_tracer("trace_test.tracer", tracer_provider=task_provider)
 #                    with tracer.start_as_current_span(name="sub_span_start_as_current") as sub_curr_s:
