@@ -12,6 +12,8 @@ import requests
 import random
 import json
 
+import anthropic
+
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry import trace
 from opentelemetry.propagate import inject, extract as otel_extract
@@ -24,22 +26,17 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 
+from airflow.exceptions import AirflowSkipException
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import chain, dag, task, Variable
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
-from pprint import pformat
-
 import praw
 
-# EDIT: Update this logger name to match your DAG name
 logger = logging.getLogger("airflow.reddit_dag")
 _REQUESTS_INSTRUMENTED = True
 
-
-# EDIT: Replace these placeholder credentials with real values.
-# Prefer reading from Airflow Variables (Variable.get("REDDIT_CLIENT_ID")) or
-# environment variables rather than hardcoding secrets here.
 reddit = praw.Reddit(
     client_id=Variable.get("REDDIT_CLIENT_ID"),
     client_secret=Variable.get("REDDIT_CLIENT_SECRET"),
@@ -117,9 +114,6 @@ def task_root_span(ti, task_provider, parent_context) -> Iterator:
 
         yield span
 
-        # After task work completes, emit a PRODUCER handoff span as a child of
-        # this CONSUMER span. The next task uses it as its parent, which is what
-        # creates the directed edge in the service map.
         with tracer.start_as_current_span(
             f"task.{ti.task_id}.trigger_next",
             kind=SpanKind.PRODUCER,
@@ -130,9 +124,6 @@ def task_root_span(ti, task_provider, parent_context) -> Iterator:
             logger.info(f"✓ Handoff context pushed to XCom: {carrier}")
 
 
-# EDIT: Rename task1/analyse_saved_posts/task3 to meaningful names that describe what each step does,
-# e.g. fetch_subreddit, process_posts, store_results.
-# Update the chain() call at the bottom to match any renames.
 @task
 def get_saved_posts(ti):
     logger.info("=" * 80)
@@ -144,8 +135,18 @@ def get_saved_posts(ti):
     parent_context = resolve_parent_context(ti, otel_task_tracer)
 
     meter = meter_provider.get_meter("reddit.saved")
-    post_gauge = meter.create_gauge("reddit.saved.post_count", description="Number of saved Reddit posts")
-    comment_gauge = meter.create_gauge("reddit.saved.comment_count", description="Number of saved Reddit comments")
+    post_gauge = meter.create_gauge("reddit.saved.post_count", description="Number of new saved Reddit posts")
+    comment_gauge = meter.create_gauge("reddit.saved.comment_count", description="Number of new saved Reddit comments")
+
+    # Fetch already-known IDs so we only process new items
+    try:
+        hook = PostgresHook(postgres_conn_id="social_archive_db")
+        rows = hook.get_records("SELECT external_id FROM saved_items WHERE source = 'reddit'")
+        known_ids = {row[0] for row in rows}
+        logger.info(f"=== {len(known_ids)} items already in database, will skip these")
+    except Exception:
+        logger.info("=== saved_items table not found yet, treating all items as new")
+        known_ids = set()
 
     sorted_posts = {}
     post_count = 0
@@ -157,74 +158,41 @@ def get_saved_posts(ti):
         if ctx.trace_id != 0:
             logger.info(f"✓ Active trace: {format(ctx.trace_id, '032x')}")
 
-        if ti.context_carrier is not None:
-            logger.info("Found ti.context_carrier: %s.", ti.context_carrier)
-            logger.info("Extracting the span context from the context_carrier.")
-            with otel_task_tracer.start_child_span(
-                span_name="part1_with_parent_ctx",
-                parent_context=parent_context,
-                component="dag",
-            ) as p1_with_ctx_s:
-                p1_with_ctx_s.set_attribute("using_parent_ctx", "true")
-                logger.info("From part1_with_parent_ctx.")
+        instrument_requests(task_provider)
 
-                with otel_task_tracer.start_child_span("sub_span_without_setting_parent") as sub1_s:
-                    sub1_s.set_attribute("get_parent_ctx_from_curr", "true")
-                    logger.info("From sub_span_without_setting_parent.")
+        with otel_task_tracer.start_child_span(span_name="fetch_saved_items"):
+            for item in reddit.user.me().saved(limit=None):
+                if item.id in known_ids:
+                    continue
 
-                    instrument_requests(task_provider)
+                sr_name = item.subreddit.display_name
 
-                    # EDIT: Replace this placeholder HTTP call with your Reddit API logic,
-                    # e.g. use the `reddit` client above to fetch posts from a subreddit.
-                    with otel_task_tracer.start_child_span(span_name="get_saved_posts") as auto_instr_s:
-                        # Fetch all saved posts
-                        for item in reddit.user.me().saved(limit=None):
-                            if isinstance(item, praw.models.Submission):
-                               # print(f"Title: {item.title}")
-                               # print(f"URL: {item.url}")
-                               # print(f"ID: {item.id}")
-                               # print(f"Sub: {item.subreddit}")
-                               # print("-" * 50)
+                if isinstance(item, praw.models.Submission):
+                    item_object = {
+                        "external_id": item.id,
+                        "type": "post",
+                        "title": item.title,
+                        "body": item.selftext,
+                        "uri": item.url,
+                    }
+                    post_count += 1
+                    if post_count % 10 == 0:
+                        logger.info(f"=== Fetched {post_count} new posts")
+                else:
+                    item_object = {
+                        "external_id": item.id,
+                        "type": "comment",
+                        "title": None,
+                        "body": item.body,
+                        "uri": item.permalink,
+                    }
+                    comment_count += 1
+                    if comment_count % 10 == 0:
+                        logger.info(f"=== Fetched {comment_count} new comments")
 
-                                item_object = {
-                                       "type": "post",
-                                       "title": item.title,
-                                       "body": item.selftext,
-                                       "uri": item.url
-                                       }
-                                sr = item.subreddit
-                                sr_name = sr.display_name
-                                if sr_name in sorted_posts:
-                                    sorted_posts[sr_name].append(item_object)
-                                else:
-                                    sorted_posts[sr_name] = []
-                                    sorted_posts[sr_name].append(item_object)
-                                post_count = post_count + 1
-                                if post_count % 10:
-                                    logger.info(f"=== Processed {post_count} posts")
-                            else:
-                                #print(f"Comment: {item.body}")
-                                #print(f"ID: {item.id}")
-                                #print("-" * 50)
-                                item_object = {
-                                       "type": "comment",
-                                       "title": None,
-                                       "body": item.body,
-                                       "uri": item.permalink
-                                       }
-                                sr = item.subreddit
-                                sr_name = sr.display_name
-                                if sr_name in sorted_posts:
-                                    sorted_posts[sr_name].append(item_object)
-                                else:
-                                    sorted_posts[sr_name] = []
-                                    sorted_posts[sr_name].append(item_object)
-                                comment_count = comment_count + 1
-                                if comment_count % 10:
-                                    logger.info(f"=== Processed {comment_count} comments")
+                sorted_posts.setdefault(sr_name, []).append(item_object)
 
-
-                        logger.info(f"=== Processed {post_count} posts and {comment_count} comments")
+            logger.info(f"=== {post_count} new posts and {comment_count} new comments to process")
 
     attrs = {"dag_id": ti.dag_id, "run_id": ti.run_id}
     post_gauge.set(post_count, attrs)
@@ -240,37 +208,142 @@ def get_saved_posts(ti):
 @task
 def analyse_saved_posts(sorted_posts, ti):
     logger.info("=" * 80)
-    logger.info(f"Analyse and process the posts - DAG: {ti.dag_id}, Run: {ti.run_id}")
+    logger.info(f"Analysing posts - DAG: {ti.dag_id}, Run: {ti.run_id}")
+
+    total = sum(len(items) for items in sorted_posts.values())
+    if total == 0:
+        logger.info("No new items to analyse, skipping.")
+        raise AirflowSkipException("No new items to analyse")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
     task_provider = create_task_provider(ti.task_id)
     instrument_requests(task_provider)
-    # EDIT: If you rename task1, update the previous_task_id here to match.
     parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="get_saved_posts")
 
+    client = anthropic.Anthropic(api_key=Variable.get("ANTHROPIC_API_KEY"))
+    enriched = {}
+
     with task_root_span(ti, task_provider, parent_context):
-        # EDIT: Replace this URL with your Reddit processing logic.
         for subreddit, items in sorted_posts.items():
+            enriched[subreddit] = []
             for item in items:
                 label = item['title'] or item['body'][:50]
-                logger.info(f"Processing {label} ({item['type']}) from r/{subreddit}")
+                logger.info(f"Analysing: {label} ({item['type']}) from r/{subreddit}")
+
+                content = f"Title: {item.get('title') or ''}\n\nBody: {item['body'][:2000]}"
+                with otel_task_tracer.start_child_span(span_name="claude.analyse_item") as claude_span:
+                    claude_span.set_attribute("item.external_id", item["external_id"])
+                    claude_span.set_attribute("item.type", item["type"])
+                    claude_span.set_attribute("item.subreddit", subreddit)
+
+                    message = client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=256,
+                        messages=[{
+                            "role": "user",
+                            "content": (
+                                f"Analyse this Reddit {item['type']} from r/{subreddit} "
+                                f"and return a JSON object with:\n"
+                                f'- "tags": a list of 3-8 relevant keyword tags (lowercase, no spaces)\n'
+                                f'- "summary": a one-sentence summary\n\n'
+                                f"Content:\n{content}\n\n"
+                                f"Respond with only valid JSON."
+                            ),
+                        }],
+                    )
+
+                    try:
+                        analysis = json.loads(message.content[0].text)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Could not parse Claude response for item {item['external_id']}, using defaults")
+                        analysis = {"tags": [], "summary": ""}
+
+                    claude_span.set_attribute("item.tags", str(analysis.get("tags", [])))
+
+                enriched[subreddit].append({**item, **analysis})
 
     task_provider.force_flush()
-    logger.info("Analysis finished")
+    logger.info(f"Analysis finished — {total} items enriched")
+    logger.info("=" * 80)
+    return enriched
+
+
+@task
+def store_results(enriched_posts, ti):
+    logger.info("=" * 80)
+    logger.info(f"Storing results - DAG: {ti.dag_id}, Run: {ti.run_id}")
+
+    otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
+    task_provider = create_task_provider(ti.task_id)
+    parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="analyse_saved_posts")
+
+    hook = PostgresHook(postgres_conn_id="social_archive_db")
+
+    with task_root_span(ti, task_provider, parent_context):
+        with hook.get_conn() as conn:
+            with conn.cursor() as cursor:
+                with otel_task_tracer.start_child_span(span_name="create_schema"):
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS saved_items (
+                            id           SERIAL PRIMARY KEY,
+                            source       VARCHAR(50)  NOT NULL,
+                            external_id  VARCHAR(50)  NOT NULL,
+                            type         VARCHAR(20)  NOT NULL,
+                            title        TEXT,
+                            body         TEXT,
+                            uri          TEXT,
+                            source_context VARCHAR(255),
+                            tags         TEXT[],
+                            summary      TEXT,
+                            saved_at     TIMESTAMPTZ  DEFAULT NOW(),
+                            UNIQUE (source, external_id)
+                        )
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS saved_items_fts
+                        ON saved_items
+                        USING gin(to_tsvector('english', coalesce(title,'') || ' ' || coalesce(body,'')))
+                    """)
+
+                inserted = 0
+                with otel_task_tracer.start_child_span(span_name="insert_items") as insert_span:
+                    for subreddit, items in enriched_posts.items():
+                        for item in items:
+                            cursor.execute("""
+                                INSERT INTO saved_items
+                                    (source, external_id, type, title, body, uri, source_context, tags, summary)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (source, external_id) DO NOTHING
+                            """, (
+                                "reddit",
+                                item["external_id"],
+                                item["type"],
+                                item.get("title"),
+                                item["body"],
+                                item["uri"],
+                                subreddit,
+                                item.get("tags", []),
+                                item.get("summary"),
+                            ))
+                            inserted += cursor.rowcount
+
+                    conn.commit()
+                    insert_span.set_attribute("items.inserted", inserted)
+                    logger.info(f"=== Inserted {inserted} items into saved_items")
+
+    task_provider.force_flush()
+    logger.info("store_results finished")
     logger.info("=" * 80)
 
+
 @dag(
-    # EDIT: Uncomment and set the schedule interval you want, e.g. timedelta(hours=1).
-    # schedule=timedelta(seconds=30),
-    # EDIT: Update start_date to an appropriate date for this DAG.
     start_date=pendulum.datetime(2025, 8, 30, tz="UTC"),
     catchup=False,
 )
 def reddit_import():
-    # EDIT: Update this chain if you add, remove, or rename tasks above.
     posts = get_saved_posts()
-    analysed_content = analyse_saved_posts(posts)
+    enriched = analyse_saved_posts(posts)
+    store_results(enriched)
 
 
-# EDIT: This must match the function name of the @dag above.
 reddit_import()
