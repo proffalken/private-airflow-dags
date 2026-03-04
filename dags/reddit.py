@@ -206,9 +206,9 @@ def get_saved_posts(ti):
 
 
 @task
-def analyse_saved_posts(sorted_posts, ti):
+def analyse_and_store(sorted_posts, ti):
     logger.info("=" * 80)
-    logger.info(f"Analysing posts - DAG: {ti.dag_id}, Run: {ti.run_id}")
+    logger.info(f"Analysing and storing posts - DAG: {ti.dag_id}, Run: {ti.run_id}")
 
     total = sum(len(items) for items in sorted_posts.values())
     if total == 0:
@@ -221,62 +221,6 @@ def analyse_saved_posts(sorted_posts, ti):
     parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="get_saved_posts")
 
     client = OpenAI(base_url="http://ollama.geeohh.svc.cluster.local:11434/v1", api_key="ollama")
-    enriched = {}
-
-    with task_root_span(ti, task_provider, parent_context):
-        for subreddit, items in sorted_posts.items():
-            enriched[subreddit] = []
-            for item in items:
-                label = item['title'] or item['body'][:50]
-                logger.info(f"Analysing: {label} ({item['type']}) from r/{subreddit}")
-
-                content = f"Title: {item.get('title') or ''}\n\nBody: {item['body'][:2000]}"
-                with otel_task_tracer.start_child_span(span_name="claude.analyse_item") as claude_span:
-                    claude_span.set_attribute("item.external_id", item["external_id"])
-                    claude_span.set_attribute("item.type", item["type"])
-                    claude_span.set_attribute("item.subreddit", subreddit)
-
-                    response = client.chat.completions.create(
-                        model="dolphin-mistral:latest",
-                        max_tokens=256,
-                        messages=[{
-                            "role": "user",
-                            "content": (
-                                f"Analyse this Reddit {item['type']} from r/{subreddit} "
-                                f"and return a JSON object with:\n"
-                                f'- "tags": a list of 3-8 relevant keyword tags (lowercase, no spaces)\n'
-                                f'- "summary": a one-sentence summary\n\n'
-                                f"Content:\n{content}\n\n"
-                                f"Respond with only valid JSON."
-                            ),
-                        }],
-                    )
-
-                    try:
-                        analysis = json.loads(response.choices[0].message.content)
-                    except json.JSONDecodeError:
-                        logger.warning(f"Could not parse Claude response for item {item['external_id']}, using defaults")
-                        analysis = {"tags": [], "summary": ""}
-
-                    claude_span.set_attribute("item.tags", str(analysis.get("tags", [])))
-
-                enriched[subreddit].append({**item, **analysis})
-
-    task_provider.force_flush()
-    logger.info(f"Analysis finished — {total} items enriched")
-    logger.info("=" * 80)
-    return enriched
-
-
-@task
-def store_results(enriched_posts, ti):
-    logger.info("=" * 80)
-    logger.info(f"Storing results - DAG: {ti.dag_id}, Run: {ti.run_id}")
-
-    otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
-    parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="analyse_saved_posts")
-
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
     with task_root_span(ti, task_provider, parent_context):
@@ -306,11 +250,45 @@ def store_results(enriched_posts, ti):
                         ON saved_items
                         USING gin(to_tsvector('english', coalesce(title,'') || ' ' || coalesce(body,'')))
                     """)
+                    conn.commit()
 
                 inserted = 0
-                with otel_task_tracer.start_child_span(span_name="insert_items") as insert_span:
-                    for subreddit, items in enriched_posts.items():
+                with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as span:
+                    for subreddit, items in sorted_posts.items():
                         for item in items:
+                            label = item['title'] or item['body'][:50]
+                            logger.info(f"Analysing: {label} ({item['type']}) from r/{subreddit}")
+
+                            content = f"Title: {item.get('title') or ''}\n\nBody: {item['body'][:2000]}"
+                            with otel_task_tracer.start_child_span(span_name="llm.analyse_item") as llm_span:
+                                llm_span.set_attribute("item.external_id", item["external_id"])
+                                llm_span.set_attribute("item.type", item["type"])
+                                llm_span.set_attribute("item.subreddit", subreddit)
+
+                                response = client.chat.completions.create(
+                                    model="dolphin-mistral:latest",
+                                    max_tokens=256,
+                                    messages=[{
+                                        "role": "user",
+                                        "content": (
+                                            f"Analyse this Reddit {item['type']} from r/{subreddit} "
+                                            f"and return a JSON object with:\n"
+                                            f'- "tags": a list of 3-8 relevant keyword tags (lowercase, no spaces)\n'
+                                            f'- "summary": a one-sentence summary\n\n'
+                                            f"Content:\n{content}\n\n"
+                                            f"Respond with only valid JSON."
+                                        ),
+                                    }],
+                                )
+
+                                try:
+                                    analysis = json.loads(response.choices[0].message.content)
+                                except json.JSONDecodeError:
+                                    logger.warning(f"Could not parse LLM response for item {item['external_id']}, using defaults")
+                                    analysis = {"tags": [], "summary": ""}
+
+                                llm_span.set_attribute("item.tags", str(analysis.get("tags", [])))
+
                             cursor.execute("""
                                 INSERT INTO saved_items
                                     (source, external_id, type, title, body, uri, source_context, tags, summary)
@@ -324,17 +302,17 @@ def store_results(enriched_posts, ti):
                                 item["body"],
                                 item["uri"],
                                 subreddit,
-                                item.get("tags", []),
-                                item.get("summary"),
+                                analysis.get("tags", []),
+                                analysis.get("summary"),
                             ))
+                            conn.commit()
                             inserted += cursor.rowcount
+                            logger.info(f"=== Stored item {item['external_id']} ({inserted} total)")
 
-                    conn.commit()
-                    insert_span.set_attribute("items.inserted", inserted)
-                    logger.info(f"=== Inserted {inserted} items into saved_items")
+                    span.set_attribute("items.inserted", inserted)
+                    logger.info(f"=== Finished — {inserted} items stored")
 
     task_provider.force_flush()
-    logger.info("store_results finished")
     logger.info("=" * 80)
 
 
@@ -344,8 +322,7 @@ def store_results(enriched_posts, ti):
 )
 def reddit_import():
     posts = get_saved_posts()
-    enriched = analyse_saved_posts(posts)
-    store_results(enriched)
+    analyse_and_store(posts)
 
 
 reddit_import()
