@@ -174,6 +174,7 @@ def get_saved_posts(ti):
                                        }
                                 sr = item.subreddit
                                 sr_name = sr.name
+                                print(f"== Post Sub: {sr_name}")
                                 if sr_name in sorted_posts:
                                     sorted_posts[sr_name].append(item_object)
                                 else:
@@ -191,6 +192,7 @@ def get_saved_posts(ti):
                                        }
                                 sr = item.subreddit
                                 sr_name = sr.name
+                                print(f"== Comment Sub: {sr_name}")
                                 if sr_name in sorted_posts:
                                     sorted_posts[sr_name].append(item_object)
                                 else:
