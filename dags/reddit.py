@@ -250,8 +250,10 @@ def analyse_saved_posts(sorted_posts, ti):
 
     with task_root_span(ti, task_provider, parent_context):
         # EDIT: Replace this URL with your Reddit processing logic.
-        for item in sorted_posts:
-            logger.info(f"Processing {item['title']} ({ item['type']})")
+        for subreddit, items in sorted_posts.items():
+            for item in items:
+                label = item['title'] or item['body'][:50]
+                logger.info(f"Processing {label} ({item['type']}) from r/{subreddit}")
 
     task_provider.force_flush()
     logger.info("Analysis finished")
