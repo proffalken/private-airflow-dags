@@ -159,15 +159,22 @@ def get_saved_posts(ti):
                         # Fetch all saved posts
                         for item in reddit.user.me().saved(limit=None):
                             if isinstance(item, praw.models.Submission):
-                                print(f"Title: {item.title}")
-                                print(f"URL: {item.url}")
-                                print(f"ID: {item.id}")
-                                print(f"Sub: {item.subreddit}")
-                                print("-" * 50)
+                               # print(f"Title: {item.title}")
+                               # print(f"URL: {item.url}")
+                               # print(f"ID: {item.id}")
+                               # print(f"Sub: {item.subreddit}")
+                               # print("-" * 50)
+                                if item.subreddit in sorted_posts:
+                                    sorted_posts[item.subreddit].append(item)
+                                else:
+                                    sorted_posts[item.subreddit] = []
+                                    sorted_posts[item.subreddit].append(item)
                             else:
                                 print(f"Comment: {item.body}")
                                 print(f"ID: {item.id}")
                                 print("-" * 50)
+
+                        print(sorted_posts)
 
 #                    tracer = trace.get_tracer("trace_test.tracer", tracer_provider=task_provider)
 #                    with tracer.start_as_current_span(name="sub_span_start_as_current") as sub_curr_s:
