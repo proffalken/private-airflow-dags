@@ -244,7 +244,7 @@ def task3(ti):
 )
 def reddit_import():
     # EDIT: Update this chain if you add, remove, or rename tasks above.
-    chain(task1(), task2(), task3())
+    chain(get_saved_posts(), task2(), task3())
 
 
 # EDIT: This must match the function name of the @dag above.
