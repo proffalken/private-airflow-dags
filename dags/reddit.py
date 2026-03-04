@@ -20,6 +20,9 @@ from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 
 from airflow.sdk import chain, dag, task, Variable
 from airflow.traces import otel_tracer
@@ -55,6 +58,16 @@ def create_task_provider(task_id: str) -> TracerProvider:
     provider = TracerProvider(resource=resource)
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
     return provider
+
+
+def create_meter_provider(task_id: str) -> MeterProvider:
+    host = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_HOST"]
+    port = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_PORT_OTLP_HTTP"]
+    endpoint = f"http://{host}:{port}/v1/metrics"
+    resource = Resource.create({SERVICE_NAME: task_id})
+    exporter = OTLPMetricExporter(endpoint=endpoint)
+    reader = PeriodicExportingMetricReader(exporter)
+    return MeterProvider(resource=resource, metric_readers=[reader])
 
 
 def instrument_requests(task_provider):
@@ -127,9 +140,16 @@ def get_saved_posts(ti):
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
     task_provider = create_task_provider(ti.task_id)
+    meter_provider = create_meter_provider(ti.task_id)
     parent_context = resolve_parent_context(ti, otel_task_tracer)
 
+    meter = meter_provider.get_meter("reddit.saved")
+    post_gauge = meter.create_gauge("reddit.saved.post_count", description="Number of saved Reddit posts")
+    comment_gauge = meter.create_gauge("reddit.saved.comment_count", description="Number of saved Reddit comments")
+
     sorted_posts = {}
+    post_count = 0
+    comment_count = 0
 
     with task_root_span(ti, task_provider, parent_context) as span:
         current_span = trace.get_current_span()
@@ -180,6 +200,7 @@ def get_saved_posts(ti):
                                 else:
                                     sorted_posts[sr_name] = []
                                     sorted_posts[sr_name].append(item_object)
+                                post_count = post_count + 1
                             else:
                                 #print(f"Comment: {item.body}")
                                 #print(f"ID: {item.id}")
@@ -198,6 +219,7 @@ def get_saved_posts(ti):
                                 else:
                                     sorted_posts[sr_name] = []
                                     sorted_posts[sr_name].append(item_object)
+                                comment_count = comment_count + 1
 
                         print(json.dumps(sorted_posts))
 
@@ -214,7 +236,13 @@ def get_saved_posts(ti):
 #                p2_with_ctx_s.set_attribute("using_parent_ctx", "true")
 #                logger.info("From part2_with_parent_ctx.")
 
+    attrs = {"dag_id": ti.dag_id, "run_id": ti.run_id}
+    post_gauge.set(post_count, attrs)
+    comment_gauge.set(comment_count, attrs)
+
     task_provider.force_flush()
+    meter_provider.force_flush()
+    meter_provider.shutdown()
     logger.info("Reddit saved post download finished.")
 
 
