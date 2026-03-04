@@ -172,11 +172,13 @@ def get_saved_posts(ti):
                                        "body": item.selftext,
                                        "uri": item.url
                                        }
-                                if item.subreddit.name in sorted_posts:
-                                    sorted_posts[item.subreddit.name].append(item_object)
+                                sr = item.subreddit
+                                sr_name = sr.name
+                                if sr_name in sorted_posts:
+                                    sorted_posts[sr_name].append(item_object)
                                 else:
-                                    sorted_posts[item.subreddit.name] = []
-                                    sorted_posts[item.subreddit.name].append(item_object)
+                                    sorted_posts[sr_name] = []
+                                    sorted_posts[sr_name].append(item_object)
                             else:
                                 #print(f"Comment: {item.body}")
                                 #print(f"ID: {item.id}")
@@ -187,11 +189,13 @@ def get_saved_posts(ti):
                                        "body": item.body,
                                        "uri": item.permalink
                                        }
-                                if item.subreddit.name in sorted_posts:
-                                    sorted_posts[item.subreddit.name].append(item_object)
+                                sr = item.subreddit
+                                sr_name = sr.name
+                                if sr_name in sorted_posts:
+                                    sorted_posts[sr_name].append(item_object)
                                 else:
-                                    sorted_posts[item.subreddit.name] = []
-                                    sorted_posts[item.subreddit.name].append(item_object)
+                                    sorted_posts[sr_name] = []
+                                    sorted_posts[sr_name].append(item_object)
 
                         print(json.dumps(sorted_posts))
 
