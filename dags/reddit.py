@@ -283,8 +283,10 @@ def analyse_and_store(sorted_posts, ti):
 
                                 try:
                                     analysis = json.loads(response.choices[0].message.content)
-                                except json.JSONDecodeError:
-                                    logger.warning(f"Could not parse LLM response for item {item['external_id']}, using defaults")
+                                    if not isinstance(analysis, dict):
+                                        raise ValueError(f"Expected dict, got {type(analysis).__name__}")
+                                except (json.JSONDecodeError, ValueError) as e:
+                                    logger.warning(f"Could not parse LLM response for item {item['external_id']} ({e}), using defaults")
                                     analysis = {"tags": [], "summary": ""}
 
                                 llm_span.set_attribute("item.tags", str(analysis.get("tags", [])))
