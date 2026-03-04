@@ -205,6 +205,55 @@ def get_saved_posts(ti):
     return sorted_posts
 
 
+def _parse_llm_json(raw: str, item_id: str) -> dict:
+    """
+    Robustly parse the LLM response into {tags, summary}.
+
+    Handles:
+    - Markdown code fences (```json ... ```)
+    - JSON array wrapping a single dict ([{...}])
+    - tags returned as a comma-separated string instead of a list
+    - Any other non-dict result
+    """
+    text = raw.strip()
+
+    # Strip markdown code fences
+    if text.startswith("```"):
+        lines = text.splitlines()
+        # Drop first line (```json or ```) and last ``` if present
+        end = -1 if lines[-1].strip() == "```" else len(lines)
+        text = "\n".join(lines[1:end]).strip()
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.warning(f"LLM response for {item_id} is not valid JSON ({e}); raw={raw!r:.200}")
+        return {"tags": [], "summary": ""}
+
+    # Unwrap a list — some models return [{...}] instead of {...}
+    if isinstance(data, list):
+        dicts = [x for x in data if isinstance(x, dict)]
+        if not dicts:
+            logger.warning(f"LLM response for {item_id} is a list with no dicts; raw={raw!r:.200}")
+            return {"tags": [], "summary": ""}
+        data = dicts[0]
+
+    if not isinstance(data, dict):
+        logger.warning(f"LLM response for {item_id} is {type(data).__name__}, not dict; raw={raw!r:.200}")
+        return {"tags": [], "summary": ""}
+
+    # Normalise tags — may arrive as a string ("python, airflow") or missing
+    tags = data.get("tags", [])
+    if isinstance(tags, str):
+        tags = [t.strip().lower() for t in tags.replace(",", " ").split() if t.strip()]
+    elif not isinstance(tags, list):
+        tags = []
+    else:
+        tags = [str(t).strip().lower() for t in tags if t]
+
+    return {"tags": tags, "summary": str(data.get("summary") or "")}
+
+
 @task
 def analyse_and_store(sorted_posts, ti):
     logger.info("=" * 80)
@@ -267,7 +316,7 @@ def analyse_and_store(sorted_posts, ti):
 
                                 response = client.chat.completions.create(
                                     model="dolphin-mistral:latest",
-                                    max_tokens=256,
+                                    max_tokens=512,
                                     messages=[{
                                         "role": "user",
                                         "content": (
@@ -281,13 +330,8 @@ def analyse_and_store(sorted_posts, ti):
                                     }],
                                 )
 
-                                try:
-                                    analysis = json.loads(response.choices[0].message.content)
-                                    if not isinstance(analysis, dict):
-                                        raise ValueError(f"Expected dict, got {type(analysis).__name__}")
-                                except (json.JSONDecodeError, ValueError) as e:
-                                    logger.warning(f"Could not parse LLM response for item {item['external_id']} ({e}), using defaults")
-                                    analysis = {"tags": [], "summary": ""}
+                                raw = response.choices[0].message.content or ""
+                                analysis = _parse_llm_json(raw, item["external_id"])
 
                                 llm_span.set_attribute("item.tags", str(analysis.get("tags", [])))
 
