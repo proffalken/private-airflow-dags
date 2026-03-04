@@ -194,13 +194,14 @@ def get_saved_posts(ti):
                                        }
                                 sr = item.subreddit
                                 sr_name = sr.display_name
-                                print(f"== Post Sub: {sr_name}")
                                 if sr_name in sorted_posts:
                                     sorted_posts[sr_name].append(item_object)
                                 else:
                                     sorted_posts[sr_name] = []
                                     sorted_posts[sr_name].append(item_object)
                                 post_count = post_count + 1
+                                if post_count % 10:
+                                    logger.info(f"=== Processed {post_count} posts")
                             else:
                                 #print(f"Comment: {item.body}")
                                 #print(f"ID: {item.id}")
@@ -213,28 +214,17 @@ def get_saved_posts(ti):
                                        }
                                 sr = item.subreddit
                                 sr_name = sr.display_name
-                                print(f"== Comment Sub: {sr_name}")
                                 if sr_name in sorted_posts:
                                     sorted_posts[sr_name].append(item_object)
                                 else:
                                     sorted_posts[sr_name] = []
                                     sorted_posts[sr_name].append(item_object)
                                 comment_count = comment_count + 1
+                                if comment_count % 10:
+                                    logger.info(f"=== Processed {comment_count} comments")
 
-                        print(json.dumps(sorted_posts))
 
-#                    tracer = trace.get_tracer("trace_test.tracer", tracer_provider=task_provider)
-#                    with tracer.start_as_current_span(name="sub_span_start_as_current") as sub_curr_s:
-#                        sub_curr_s.set_attribute("start_as_current", "true")
-#                        logger.info("From sub_span_start_as_current.")
-
-#            with otel_task_tracer.start_child_span(
-#                span_name="part2_with_parent_ctx",
-#                parent_context=parent_context,
-#                component="dag",
-#            ) as p2_with_ctx_s:
-#                p2_with_ctx_s.set_attribute("using_parent_ctx", "true")
-#                logger.info("From part2_with_parent_ctx.")
+                        logger.info(f"=== Processed {post_count} posts and {comment_count} comments")
 
     attrs = {"dag_id": ti.dag_id, "run_id": ti.run_id}
     post_gauge.set(post_count, attrs)
@@ -261,7 +251,7 @@ def analyse_saved_posts(sorted_posts, ti):
     with task_root_span(ti, task_provider, parent_context):
         # EDIT: Replace this URL with your Reddit processing logic.
         for item in sorted_posts:
-            logger.info(f"Processing {item.title} ({ item.type})")
+            logger.info(f"Processing {item['title']} ({ item['type']})")
 
     task_provider.force_flush()
     logger.info("Analysis finished")
