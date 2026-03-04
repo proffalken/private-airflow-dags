@@ -12,7 +12,7 @@ import requests
 import random
 import json
 
-import anthropic
+from openai import OpenAI
 
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry import trace
@@ -220,7 +220,7 @@ def analyse_saved_posts(sorted_posts, ti):
     instrument_requests(task_provider)
     parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="get_saved_posts")
 
-    client = anthropic.Anthropic(api_key=Variable.get("ANTHROPIC_API_KEY"))
+    client = OpenAI(base_url="http://ollama.geeohh.svc.cluster.local:11434/v1", api_key="ollama")
     enriched = {}
 
     with task_root_span(ti, task_provider, parent_context):
@@ -236,8 +236,8 @@ def analyse_saved_posts(sorted_posts, ti):
                     claude_span.set_attribute("item.type", item["type"])
                     claude_span.set_attribute("item.subreddit", subreddit)
 
-                    message = client.messages.create(
-                        model="claude-haiku-4-5-20251001",
+                    response = client.chat.completions.create(
+                        model="dolphin-mistral:latest",
                         max_tokens=256,
                         messages=[{
                             "role": "user",
@@ -253,7 +253,7 @@ def analyse_saved_posts(sorted_posts, ti):
                     )
 
                     try:
-                        analysis = json.loads(message.content[0].text)
+                        analysis = json.loads(response.choices[0].message.content)
                     except json.JSONDecodeError:
                         logger.warning(f"Could not parse Claude response for item {item['external_id']}, using defaults")
                         analysis = {"tags": [], "summary": ""}
