@@ -1,0 +1,40 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets:
+  - name: ghcr-credentials
+
+backend:
+  image:
+    repository: ghcr.io/proffalken/private-airflow-dags/social-archive-backend
+    tag: latest
+    pullPolicy: Always
+  replicas: 1
+  # Name of the k8s Secret containing:
+  #   DATABASE_URL, JWT_SECRET, ADMIN_USERNAME, ADMIN_PASSWORD
+  secretName: social-archive-secrets
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+frontend:
+  image:
+    repository: ghcr.io/proffalken/private-airflow-dags/social-archive-frontend
+    tag: latest
+    pullPolicy: Always
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+ingress:
+  host: social-archive.wallace.network
+  tlsSecret: social-archive-tls

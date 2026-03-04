@@ -1,0 +1,6 @@
+apiVersion: v2
+name: social-archive
+description: Social Archive web app — browse and manage saved social media items
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
