@@ -26,6 +26,7 @@ from airflow.traces.tracer import Trace
 
 from pprint import pformat
 
+# EDIT: Update this logger name if you rename the DAG.
 logger = logging.getLogger("airflow.otel_template_dag")
 _REQUESTS_INSTRUMENTED = False
 
@@ -133,6 +134,7 @@ def task1(ti):
 
                     instrument_requests(task_provider)
 
+                    # EDIT: Replace this placeholder HTTP call with your actual task1 logic.
                     with otel_task_tracer.start_child_span(span_name="get_repos_auto_instrumentation") as auto_instr_s:
                         todo = random.randrange(0, 199)
                         response = requests.get(f"https://jsonplaceholder.typicode.com/todos/{todo}")
@@ -167,6 +169,7 @@ def task2(ti):
     parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="task1")
 
     with task_root_span(ti, task_provider, parent_context):
+        # EDIT: Replace this URL with your actual task2 logic.
         res = requests.get(
             "https://monitorama-demo-test.wallace.network/space_json/",
             timeout=25
@@ -189,6 +192,7 @@ def task3(ti):
     parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="task2")
 
     with task_root_span(ti, task_provider, parent_context):
+        # EDIT: Replace this Lambda call with your actual task3 logic.
         header = {"x-shared-secret": Variable.get("LAMBDA_SHARED_SECRET")}
         rn = random.randrange(0, 256)
         res = requests.get(
@@ -204,12 +208,16 @@ def task3(ti):
 
 
 @dag(
-   # schedule=timedelta(seconds=30),
+    # EDIT: Uncomment and set your desired schedule interval.
+    # schedule=timedelta(seconds=30),
+    # EDIT: Update start_date to match when this DAG should begin scheduling runs.
     start_date=pendulum.datetime(2025, 8, 30, tz="UTC"),
     catchup=False,
 )
 def otel_template_dag():
+    # EDIT: Update this chain if you add, remove, or rename tasks above.
     chain(task1(), task2(), task3())
 
 
+# EDIT: This must match the @dag function name above.
 otel_template_dag()
