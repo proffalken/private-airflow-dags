@@ -169,6 +169,7 @@ def get_saved_posts(ti):
                                 item_object = {
                                        "type": "post",
                                        "title": item.title,
+                                       "body": item.body,
                                        "uri": item.url
                                        }
                                 if item.subreddit in sorted_posts:
@@ -182,8 +183,9 @@ def get_saved_posts(ti):
                                 print("-" * 50)
                                 item_object = {
                                        "type": "comment",
-                                       "title": item.title,
-                                       "uri": item.url
+                                       "title": None,
+                                       "body": item.body,
+                                       "uri": item.permalink
                                        }
                                 if item.subreddit in sorted_posts:
                                     sorted_posts[item.subreddit].append(item_object)
