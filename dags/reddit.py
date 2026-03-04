@@ -172,11 +172,11 @@ def get_saved_posts(ti):
                                        "body": item.selftext,
                                        "uri": item.url
                                        }
-                                if item.subreddit in sorted_posts:
-                                    sorted_posts[item.subreddit].append(item_object)
+                                if item.subreddit.name in sorted_posts:
+                                    sorted_posts[item.subreddit.name].append(item_object)
                                 else:
-                                    sorted_posts[item.subreddit] = []
-                                    sorted_posts[item.subreddit].append(item_object)
+                                    sorted_posts[item.subreddit.name] = []
+                                    sorted_posts[item.subreddit.name].append(item_object)
                             else:
                                 #print(f"Comment: {item.body}")
                                 #print(f"ID: {item.id}")
@@ -187,11 +187,11 @@ def get_saved_posts(ti):
                                        "body": item.body,
                                        "uri": item.permalink
                                        }
-                                if item.subreddit in sorted_posts:
-                                    sorted_posts[item.subreddit].append(item_object)
+                                if item.subreddit.name in sorted_posts:
+                                    sorted_posts[item.subreddit.name].append(item_object)
                                 else:
-                                    sorted_posts[item.subreddit] = []
-                                    sorted_posts[item.subreddit].append(item_object)
+                                    sorted_posts[item.subreddit.name] = []
+                                    sorted_posts[item.subreddit.name].append(item_object)
 
                         print(json.dumps(sorted_posts))
 
