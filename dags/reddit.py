@@ -130,7 +130,7 @@ def task_root_span(ti, task_provider, parent_context) -> Iterator:
             logger.info(f"✓ Handoff context pushed to XCom: {carrier}")
 
 
-# EDIT: Rename task1/task2/task3 to meaningful names that describe what each step does,
+# EDIT: Rename task1/analyse_saved_posts/task3 to meaningful names that describe what each step does,
 # e.g. fetch_subreddit, process_posts, store_results.
 # Update the chain() call at the bottom to match any renames.
 @task
@@ -244,59 +244,28 @@ def get_saved_posts(ti):
     meter_provider.force_flush()
     meter_provider.shutdown()
     logger.info("Reddit saved post download finished.")
+    return sorted_posts
 
 
 @task
-def task2(ti):
+def analyse_saved_posts(sorted_posts, ti):
     logger.info("=" * 80)
-    logger.info(f"Starting Task_2 - DAG: {ti.dag_id}, Run: {ti.run_id}")
+    logger.info(f"Analyse and process the posts - DAG: {ti.dag_id}, Run: {ti.run_id}")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
     task_provider = create_task_provider(ti.task_id)
     instrument_requests(task_provider)
     # EDIT: If you rename task1, update the previous_task_id here to match.
-    parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="task1")
+    parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="get_saved_posts")
 
     with task_root_span(ti, task_provider, parent_context):
         # EDIT: Replace this URL with your Reddit processing logic.
-        res = requests.get(
-            "https://monitorama-demo-test.wallace.network/space_json/",
-            timeout=25
-        )
-        logger.info(f"\n\tStatus: {res.status_code}\n\tBody: {res.text[:200]}")
+        for item in sorted_posts:
+            logger.info(f"Processing {item.title} ({ item.type})")
 
     task_provider.force_flush()
-    logger.info("Task_2 finished")
+    logger.info("Analysis finished")
     logger.info("=" * 80)
-
-
-@task
-def task3(ti):
-    logger.info("=" * 80)
-    logger.info(f"Starting Task_3 - DAG: {ti.dag_id}, Run: {ti.run_id}")
-
-    otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
-    instrument_requests(task_provider)
-    # EDIT: If you rename task2, update the previous_task_id here to match.
-    parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="task2")
-
-    with task_root_span(ti, task_provider, parent_context):
-        # EDIT: Replace this Lambda call with your Reddit storage/export logic.
-        # The LAMBDA_SHARED_SECRET Variable can be repurposed or removed.
-        header = {"x-shared-secret": Variable.get("LAMBDA_SHARED_SECRET")}
-        rn = random.randrange(0, 256)
-        res = requests.get(
-            f"https://3jqmloorwqgmwwdoabvtcxp5pu0mqftr.lambda-url.eu-west-2.on.aws/?name=Matt&x={rn}",
-            timeout=25,
-            headers=header
-        )
-        logger.info(f"\n\tStatus: {res.status_code}\n\tBody: {res.text[:200]}")
-
-    task_provider.force_flush()
-    logger.info("Task_3 finished")
-    logger.info("=" * 80)
-
 
 @dag(
     # EDIT: Uncomment and set the schedule interval you want, e.g. timedelta(hours=1).
@@ -307,7 +276,8 @@ def task3(ti):
 )
 def reddit_import():
     # EDIT: Update this chain if you add, remove, or rename tasks above.
-    chain(get_saved_posts(), task2(), task3())
+    posts = get_saved_posts()
+    analysed_content = analyse_saved_posts(posts)
 
 
 # EDIT: This must match the function name of the @dag above.
