@@ -285,19 +285,21 @@ def store_results(enriched_posts, ti):
                 with otel_task_tracer.start_child_span(span_name="create_schema"):
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS saved_items (
-                            id           SERIAL PRIMARY KEY,
-                            source       VARCHAR(50)  NOT NULL,
-                            external_id  VARCHAR(50)  NOT NULL,
-                            type         VARCHAR(20)  NOT NULL,
-                            title        TEXT,
-                            body         TEXT,
-                            uri          TEXT,
-                            source_context VARCHAR(255),
-                            tags         TEXT[],
-                            summary      TEXT,
-                            saved_at     TIMESTAMPTZ  DEFAULT NOW(),
+                            id                   SERIAL PRIMARY KEY,
+                            source               VARCHAR(50)  NOT NULL,
+                            external_id          VARCHAR(50)  NOT NULL,
+                            type                 VARCHAR(20)  NOT NULL,
+                            title                TEXT,
+                            body                 TEXT,
+                            uri                  TEXT,
+                            source_context       VARCHAR(255),
+                            tags                 TEXT[],
+                            summary              TEXT,
+                            flagged_for_deletion BOOLEAN      NOT NULL DEFAULT false,
+                            saved_at             TIMESTAMPTZ  DEFAULT NOW(),
                             UNIQUE (source, external_id)
-                        )
+                        );
+                        ALTER TABLE saved_items ADD COLUMN IF NOT EXISTS flagged_for_deletion BOOLEAN NOT NULL DEFAULT false
                     """)
                     cursor.execute("""
                         CREATE INDEX IF NOT EXISTS saved_items_fts
