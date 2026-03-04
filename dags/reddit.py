@@ -173,7 +173,7 @@ def get_saved_posts(ti):
                                        "uri": item.url
                                        }
                                 sr = item.subreddit
-                                sr_name = sr.name
+                                sr_name = sr.display_name
                                 print(f"== Post Sub: {sr_name}")
                                 if sr_name in sorted_posts:
                                     sorted_posts[sr_name].append(item_object)
@@ -191,7 +191,7 @@ def get_saved_posts(ti):
                                        "uri": item.permalink
                                        }
                                 sr = item.subreddit
-                                sr_name = sr.name
+                                sr_name = sr.display_name
                                 print(f"== Comment Sub: {sr_name}")
                                 if sr_name in sorted_posts:
                                     sorted_posts[sr_name].append(item_object)
