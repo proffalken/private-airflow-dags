@@ -128,6 +128,8 @@ def get_saved_posts(ti):
     task_provider = create_task_provider(ti.task_id)
     parent_context = resolve_parent_context(ti, otel_task_tracer)
 
+    sorted_posts = {}
+
     with task_root_span(ti, task_provider, parent_context) as span:
         current_span = trace.get_current_span()
         ctx = current_span.get_span_context()
@@ -160,6 +162,7 @@ def get_saved_posts(ti):
                                 print(f"Title: {item.title}")
                                 print(f"URL: {item.url}")
                                 print(f"ID: {item.id}")
+                                print(f"Sub: {item.subreddit}")
                                 print("-" * 50)
                             else:
                                 print(f"Comment: {item.body}")
