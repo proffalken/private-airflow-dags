@@ -36,6 +36,19 @@ interface ItemsResponse {
   offset: number
 }
 
+async function fetchSourceContexts(token: string): Promise<string[]> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/source_contexts`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store',
+    })
+    if (!res.ok) return []
+    return res.json()
+  } catch {
+    return []
+  }
+}
+
 async function fetchItems(
   token: string,
   params: SearchParams,
@@ -77,7 +90,10 @@ export default async function Home({
   const token = cookieStore.get('token')?.value
   if (!token) redirect('/login')
 
-  const data = await fetchItems(token, searchParams)
+  const [data, sourceContexts] = await Promise.all([
+    fetchItems(token, searchParams),
+    fetchSourceContexts(token),
+  ])
   if (!data) redirect('/login')
 
   const limit = parseInt(searchParams.limit || '50')
@@ -113,7 +129,7 @@ export default async function Home({
       </div>
 
       <Suspense>
-        <SearchBar />
+        <SearchBar sourceContexts={sourceContexts} />
       </Suspense>
 
       <div className="mt-6 space-y-3">

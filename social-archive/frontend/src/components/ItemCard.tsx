@@ -82,12 +82,13 @@ export function ItemCard({ item }: { item: Item }) {
             {item.tags && item.tags.length > 0 && (
               <div className="flex gap-1 flex-wrap">
                 {item.tags.map(tag => (
-                  <span
+                  <a
                     key={tag}
-                    className="text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded"
+                    href={`/?tags=${encodeURIComponent(tag)}`}
+                    className="text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded hover:bg-blue-200 transition-colors"
                   >
                     {tag}
-                  </span>
+                  </a>
                 ))}
               </div>
             )}

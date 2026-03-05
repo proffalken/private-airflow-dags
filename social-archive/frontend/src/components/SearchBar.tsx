@@ -3,7 +3,7 @@
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useState } from 'react'
 
-export function SearchBar() {
+export function SearchBar({ sourceContexts = [] }: { sourceContexts?: string[] }) {
   const router = useRouter()
   const searchParams = useSearchParams()
 
@@ -55,13 +55,16 @@ export function SearchBar() {
         </button>
       </div>
       <div className="flex gap-2 flex-wrap">
-        <input
-          type="text"
+        <select
           value={sourceContext}
           onChange={e => setSourceContext(e.target.value)}
-          placeholder="Source context"
-          className="w-40 px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
+          className="w-48 px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          <option value="">All sources</option>
+          {sourceContexts.map(sc => (
+            <option key={sc} value={sc}>{sc}</option>
+          ))}
+        </select>
         <input
           type="text"
           value={tags}

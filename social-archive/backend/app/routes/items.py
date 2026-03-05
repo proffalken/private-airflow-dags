@@ -79,6 +79,20 @@ async def list_items(
     return ItemsResponse(items=items, total=total, limit=limit, offset=offset)
 
 
+@router.get("/api/source_contexts")
+async def list_source_contexts(
+    db=Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    async with db.cursor() as cur:
+        await cur.execute(
+            "SELECT DISTINCT source_context FROM saved_items"
+            " WHERE source_context IS NOT NULL ORDER BY source_context"
+        )
+        rows = await cur.fetchall()
+    return [r[0] for r in rows]
+
+
 @router.patch("/api/items/{item_id}/flag")
 async def flag_item(
     item_id: int,
