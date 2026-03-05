@@ -220,9 +220,21 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
             collections = cl.collections()
             logger.info(f"Found {len(collections)} Instagram collections")
 
-            for collection in collections:
+            # Separate auto-collections (e.g. "All posts") from user-created ones.
+            # ALL_MEDIA_AUTO_COLLECTION contains every saved item; we use it at the
+            # end to catch anything not in a named collection.
+            all_posts_collection = None
+            named_collections = []
+            for c in collections:
+                if c.type == "ALL_MEDIA_AUTO_COLLECTION":
+                    all_posts_collection = c
+                else:
+                    named_collections.append(c)
+
+            # Process user-created named collections first
+            for collection in named_collections:
                 collection_name = collection.name
-                logger.info(f"Fetching collection: {collection_name!r}")
+                logger.info(f"Fetching collection: {collection_name!r} (id={collection.id})")
 
                 with otel_task_tracer.start_child_span(
                     span_name=f"fetch_collection.{collection.id}"
@@ -250,38 +262,39 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
                     })
                     new_count += 1
 
-        # Fetch all saves and add anything not already in a named collection
-        with otel_task_tracer.start_child_span(span_name="fetch_uncollected_saves"):
-            all_saved = cl.user_saved_medias(amount=0)
-            uncollected_count = 0
+        # Use the "All posts" auto-collection to pick up saves not in any
+        # named collection (source_context = "Saved")
+        uncollected_count = 0
+        if all_posts_collection:
+            with otel_task_tracer.start_child_span(span_name="fetch_uncollected_saves"):
+                medias = cl.collection_medias(all_posts_collection.id, amount=0)
 
-            for media in all_saved:
-                pk_str = str(media.pk)
+                for media in medias:
+                    pk_str = str(media.pk)
 
-                if pk_str in seen_pks:
-                    continue  # already handled via a collection
-                seen_pks.add(pk_str)
+                    if pk_str in seen_pks:
+                        continue  # already captured under a named collection
+                    seen_pks.add(pk_str)
 
-                if pk_str in known_ids:
-                    continue
+                    if pk_str in known_ids:
+                        continue
 
-                caption = media.caption_text or ""
-                media_type = _MEDIA_TYPE_NAMES.get(media.media_type, "post")
-                uri = f"https://www.instagram.com/p/{media.code}/"
+                    caption = media.caption_text or ""
+                    media_type = _MEDIA_TYPE_NAMES.get(media.media_type, "post")
+                    uri = f"https://www.instagram.com/p/{media.code}/"
 
-                sorted_posts.setdefault("Saved", []).append({
-                    "external_id": pk_str,
-                    "type": media_type,
-                    "title": None,
-                    "body": caption,
-                    "uri": uri,
-                    "caption_hashtags": extract_hashtags(caption),
-                })
-                new_count += 1
-                uncollected_count += 1
+                    sorted_posts.setdefault("Saved", []).append({
+                        "external_id": pk_str,
+                        "type": media_type,
+                        "title": None,
+                        "body": caption,
+                        "uri": uri,
+                        "caption_hashtags": extract_hashtags(caption),
+                    })
+                    new_count += 1
+                    uncollected_count += 1
 
-            logger.info(f"Found {uncollected_count} uncollected saves")
-
+        logger.info(f"Found {uncollected_count} uncollected saves")
         span.set_attribute("instagram.new_items", new_count)
         logger.info(f"=== {new_count} new Instagram items to process")
 
