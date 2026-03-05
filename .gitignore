@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Node / Next.js
+node_modules/
+.next/
+.env.local
+.env*.local
+npm-debug.log*
+
+# Secrets / credentials — never commit these
+secrets.values.yaml
+*.values.secret.yaml
+.env
+.env.*
+!.env.example
+
+# Helm
+helm/charts/
+*.tgz
+
+# Kubernetes — generated manifests, not templates
+/k8s/rendered/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Airflow local dev
+logs/
+airflow.db
+airflow.cfg
+standalone_admin_password.txt
