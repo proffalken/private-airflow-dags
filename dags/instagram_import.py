@@ -225,9 +225,9 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
                 logger.info(f"Fetching collection: {collection_name!r}")
 
                 with otel_task_tracer.start_child_span(
-                    span_name=f"fetch_collection.{collection.pk}"
+                    span_name=f"fetch_collection.{collection.id}"
                 ):
-                    medias = cl.collection_medias(collection.pk, amount=0)
+                    medias = cl.collection_medias(collection.id, amount=0)
 
                 for media in medias:
                     pk_str = str(media.pk)
