@@ -11,7 +11,33 @@ from typing import Iterator
 import pendulum
 
 from instagrapi import Client
+from instagrapi import extractors as _ig_extractors
 from instagrapi.exceptions import LoginRequired, ChallengeRequired
+
+# Monkey-patch: extract_resource_v1 crashes with IndexError when
+# image_versions2.candidates is an empty list (happens with Reels/newer formats
+# inside carousels). Patch it to handle that gracefully.
+_orig_extract_resource_v1 = _ig_extractors.extract_resource_v1
+
+
+def _safe_extract_resource_v1(data):
+    if "video_versions" in data:
+        video_versions = data.get("video_versions") or []
+        if video_versions:
+            data["video_url"] = sorted(
+                video_versions, key=lambda o: o["height"] * o["width"]
+            )[-1]["url"]
+    candidates = (data.get("image_versions2") or {}).get("candidates") or []
+    if candidates:
+        data["thumbnail_url"] = sorted(
+            candidates, key=lambda o: o["height"] * o["width"]
+        )[-1]["url"]
+    else:
+        data["thumbnail_url"] = ""
+    return _ig_extractors.Resource(**data)
+
+
+_ig_extractors.extract_resource_v1 = _safe_extract_resource_v1
 
 from openai import OpenAI
 
