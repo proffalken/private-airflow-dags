@@ -5,9 +5,10 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://social-archive-backend:80
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { route: string[] } },
+  { params }: { params: Promise<{ route: string[] }> },
 ) {
-  const route = params.route.join('/')
+  const { route: routeSegments } = await params
+  const route = routeSegments.join('/')
 
   if (route === 'login') {
     const body = await request.json()
@@ -39,9 +40,10 @@ export async function POST(
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { route: string[] } },
+  { params }: { params: Promise<{ route: string[] }> },
 ) {
-  const route = params.route.join('/')
+  const { route: routeSegments } = await params
+  const route = routeSegments.join('/')
 
   if (route === 'logout') {
     const response = NextResponse.redirect(
@@ -52,7 +54,7 @@ export async function GET(
   }
 
   if (route === 'me') {
-    const cookieStore = cookies()
+    const cookieStore = await cookies()
     const token = cookieStore.get('token')?.value
     if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 

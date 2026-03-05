@@ -5,14 +5,14 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://social-archive-backend:80
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } },
+  { params }: { params: Promise<{ id: string }> },
 ) {
-  const cookieStore = cookies()
+  const [{ id }, cookieStore] = await Promise.all([params, cookies()])
   const token = cookieStore.get('token')?.value
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await request.json()
-  const res = await fetch(`${BACKEND_URL}/api/items/${params.id}/flag`, {
+  const res = await fetch(`${BACKEND_URL}/api/items/${id}/flag`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',

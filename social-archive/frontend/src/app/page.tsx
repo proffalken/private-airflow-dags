@@ -69,11 +69,11 @@ async function fetchItems(
 }
 
 export default async function Home({
-  searchParams,
+  searchParams: searchParamsPromise,
 }: {
-  searchParams: SearchParams
+  searchParams: Promise<SearchParams>
 }) {
-  const cookieStore = cookies()
+  const [searchParams, cookieStore] = await Promise.all([searchParamsPromise, cookies()])
   const token = cookieStore.get('token')?.value
   if (!token) redirect('/login')
 
