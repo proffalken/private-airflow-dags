@@ -43,6 +43,20 @@ def _safe_extract_resource_v1(data):
 
 _ig_extractors.extract_resource_v1 = _safe_extract_resource_v1
 
+# Patch 2: extract_media_v1 crashes when the API omits the `code` field
+# (shortcode). collection.py imports extract_media_v1 directly via
+# `from ... import`, so we must patch it in that module's namespace.
+from instagrapi.mixins import collection as _ig_collection
+_orig_extract_media_v1 = _ig_collection.extract_media_v1
+
+
+def _safe_extract_media_v1(data):
+    data.setdefault("code", "")
+    return _orig_extract_media_v1(data)
+
+
+_ig_collection.extract_media_v1 = _safe_extract_media_v1
+
 from openai import OpenAI
 
 from opentelemetry import trace
@@ -280,7 +294,7 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
 
                     caption = media.caption_text or ""
                     media_type = _MEDIA_TYPE_NAMES.get(media.media_type, "post")
-                    uri = f"https://www.instagram.com/p/{media.code}/"
+                    uri = f"https://www.instagram.com/p/{media.code}/" if media.code else None
 
                     sorted_posts.setdefault(collection_name, []).append({
                         "external_id": pk_str,
@@ -311,7 +325,7 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
 
                     caption = media.caption_text or ""
                     media_type = _MEDIA_TYPE_NAMES.get(media.media_type, "post")
-                    uri = f"https://www.instagram.com/p/{media.code}/"
+                    uri = f"https://www.instagram.com/p/{media.code}/" if media.code else None
 
                     sorted_posts.setdefault("Saved", []).append({
                         "external_id": pk_str,
