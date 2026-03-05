@@ -2,4 +2,4 @@ fastapi
 uvicorn[standard]
 psycopg[binary,pool]
 python-jose[cryptography]
-passlib[bcrypt]
+bcrypt
