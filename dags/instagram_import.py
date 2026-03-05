@@ -188,6 +188,9 @@ def _parse_llm_json(raw: str, item_id: str) -> dict:
         end = -1 if lines[-1].strip() == "```" else len(lines)
         text = "\n".join(lines[1:end]).strip()
 
+    # Fix common LLM mistakes: trailing commas before } or ]
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -460,6 +463,19 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
 
                             llm_span.set_attribute("item.tags", str(merged_tags))
 
+                            # Derive a display title so the item is always
+                            # clickable in the frontend: prefer LLM summary,
+                            # fall back to truncated caption.
+                            llm_summary = analysis.get("summary") or ""
+                            if llm_summary:
+                                display_title = llm_summary
+                            elif caption:
+                                display_title = caption[:120].rstrip()
+                                if len(caption) > 120:
+                                    display_title += "…"
+                            else:
+                                display_title = external_id
+
                             cursor.execute("""
                                 INSERT INTO saved_items
                                     (source, external_id, type, title, body,
@@ -470,7 +486,7 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                                 "instagram",
                                 external_id,
                                 item["type"],
-                                item.get("title"),
+                                display_title,
                                 caption,
                                 item["uri"],
                                 collection_name,
