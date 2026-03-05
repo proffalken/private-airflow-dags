@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import timedelta
+import json
 import logging
 import os
 from typing import Iterator
@@ -9,6 +10,9 @@ from typing import Iterator
 import pendulum
 import praw
 import prawcore
+
+from instagrapi import Client as InstagramClient
+from instagrapi.exceptions import LoginRequired, ChallengeRequired
 
 from opentelemetry import trace
 from opentelemetry.propagate import inject, extract as otel_extract
@@ -195,13 +199,90 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
     return cleaned_ids
 
 
-# To add a new source, copy the pattern above:
-#
-# @task
-# def cleanup_mastodon(flagged_items: list[dict], ti) -> list[int]:
-#     mastodon_items = [i for i in flagged_items if i["source"] == "mastodon"]
-#     ...
-#     return cleaned_ids
+def _get_instagram_client() -> InstagramClient:
+    """Return an authenticated instagrapi Client, reusing a saved session."""
+    cl = InstagramClient()
+    cl.delay_range = [1, 3]
+    session_str = Variable.get("INSTAGRAM_SESSION", default_var="")
+    if session_str:
+        try:
+            cl.load_settings(json.loads(session_str))
+        except Exception as exc:
+            logger.warning(f"Could not load Instagram session: {exc}")
+    try:
+        cl.login(
+            Variable.get("INSTAGRAM_USERNAME"),
+            Variable.get("INSTAGRAM_PASSWORD"),
+        )
+    except (LoginRequired, ChallengeRequired) as exc:
+        raise RuntimeError("Instagram login failed — check Variables and clear INSTAGRAM_SESSION") from exc
+    Variable.set("INSTAGRAM_SESSION", json.dumps(cl.get_settings()))
+    return cl
+
+
+@task
+def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
+    """Unsave flagged Instagram items from the authenticated user's saved posts.
+
+    Calls media_unsave() for each item. Items that no longer exist on Instagram
+    are treated as successfully cleaned. Transient errors are logged and retried
+    on the next run.
+    """
+    instagram_items = [i for i in flagged_items if i["source"] == "instagram"]
+
+    if not instagram_items:
+        logger.info("No Instagram items flagged for cleanup")
+        return []
+
+    otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
+    task_provider = create_task_provider(ti.task_id)
+    parent_context = resolve_parent_context(
+        ti, otel_task_tracer, previous_task_id="get_flagged_items"
+    )
+
+    cl = _get_instagram_client()
+    cleaned_ids: list[int] = []
+    failed_ids: list[str] = []
+
+    with task_root_span(ti, task_provider, parent_context) as span:
+        span.set_attribute("instagram.items_to_clean", len(instagram_items))
+
+        for item in instagram_items:
+            external_id = item["external_id"]
+            item_type = item["type"]
+
+            with otel_task_tracer.start_child_span(
+                span_name=f"instagram.unsave.{external_id}"
+            ) as item_span:
+                item_span.set_attribute("item.external_id", external_id)
+                item_span.set_attribute("item.type", item_type)
+
+                try:
+                    cl.media_unsave(external_id)
+                    cleaned_ids.append(item["id"])
+                    logger.info(f"Unsaved Instagram {item_type} {external_id}")
+
+                except Exception as exc:
+                    exc_str = str(exc).lower()
+                    if any(word in exc_str for word in ("not found", "404", "deleted", "media_not_found")):
+                        logger.warning(
+                            f"Instagram {item_type} {external_id} not found "
+                            f"(deleted?); removing from archive regardless"
+                        )
+                        cleaned_ids.append(item["id"])
+                    else:
+                        logger.error(f"Failed to unsave Instagram {item_type} {external_id}: {exc}")
+                        item_span.set_attribute("error", str(exc))
+                        failed_ids.append(external_id)
+
+        span.set_attribute("instagram.items_cleaned", len(cleaned_ids))
+        span.set_attribute("instagram.items_failed", len(failed_ids))
+        logger.info(
+            f"Instagram cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed"
+        )
+
+    task_provider.force_flush()
+    return cleaned_ids
 
 
 @task
@@ -219,9 +300,8 @@ def remove_cleaned_items(cleaned_id_lists: list[list[int]], ti) -> None:
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
     task_provider = create_task_provider(ti.task_id)
-    parent_context = resolve_parent_context(
-        ti, otel_task_tracer, previous_task_id="cleanup_reddit"
-    )
+    # Multiple upstream tasks — fall back to Airflow carrier for context
+    parent_context = resolve_parent_context(ti, otel_task_tracer)
 
     with task_root_span(ti, task_provider, parent_context) as span:
         hook = PostgresHook(postgres_conn_id="social_archive_db")
@@ -252,12 +332,11 @@ def social_archive_cleanup():
     flagged = get_flagged_items()
 
     reddit_cleaned = cleanup_reddit(flagged)
+    instagram_cleaned = cleanup_instagram(flagged)
     # Add new sources here, e.g.:
     #   mastodon_cleaned = cleanup_mastodon(flagged)
 
-    remove_cleaned_items([reddit_cleaned])
-    # When adding sources, extend the list:
-    #   remove_cleaned_items([reddit_cleaned, mastodon_cleaned])
+    remove_cleaned_items([reddit_cleaned, instagram_cleaned])
 
 
 social_archive_cleanup()
