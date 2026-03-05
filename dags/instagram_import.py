@@ -32,9 +32,13 @@ def _safe_extract_resource_v1(data):
         data["thumbnail_url"] = sorted(
             candidates, key=lambda o: o["height"] * o["width"]
         )[-1]["url"]
+        return _ig_extractors.Resource(**data)
     else:
-        data["thumbnail_url"] = ""
-    return _ig_extractors.Resource(**data)
+        # No thumbnail available (Reels/newer format in carousel) — use
+        # model_construct to bypass Pydantic URL validation. We don't use
+        # carousel resource thumbnails anywhere, so this is safe.
+        data["thumbnail_url"] = None
+        return _ig_extractors.Resource.model_construct(**data)
 
 
 _ig_extractors.extract_resource_v1 = _safe_extract_resource_v1
