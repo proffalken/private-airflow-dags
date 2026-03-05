@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..database import get_db
-from ..models import FlagRequest, ItemResponse, ItemsResponse
+from ..models import EditRequest, FlagRequest, ItemResponse, ItemsResponse
 from .auth import get_current_user
 
 router = APIRouter()
@@ -91,6 +91,35 @@ async def list_source_contexts(
         )
         rows = await cur.fetchall()
     return [r[0] for r in rows]
+
+
+@router.patch("/api/items/{item_id}")
+async def edit_item(
+    item_id: int,
+    body: EditRequest,
+    db=Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    updates: list[str] = []
+    params: list = []
+    if body.title is not None:
+        updates.append("title = %s")
+        params.append(body.title)
+    if body.tags is not None:
+        updates.append("tags = %s")
+        params.append(body.tags)
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    params.append(item_id)
+    async with db.cursor() as cur:
+        await cur.execute(
+            f"UPDATE saved_items SET {', '.join(updates)} WHERE id = %s RETURNING id",
+            params,
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"id": item_id}
 
 
 @router.patch("/api/items/{item_id}/flag")

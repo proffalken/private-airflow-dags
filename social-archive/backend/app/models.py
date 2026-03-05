@@ -40,3 +40,8 @@ class ItemsResponse(BaseModel):
 
 class FlagRequest(BaseModel):
     flagged_for_deletion: bool
+
+
+class EditRequest(BaseModel):
+    title: Optional[str] = None
+    tags: Optional[list[str]] = None
