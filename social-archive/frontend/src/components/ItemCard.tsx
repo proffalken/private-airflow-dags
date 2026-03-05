@@ -50,9 +50,6 @@ export function ItemCard({ item }: { item: Item }) {
                 {item.type}
               </span>
             )}
-            {item.score !== null && (
-              <span className="text-xs text-gray-500">↑ {item.score}</span>
-            )}
           </div>
 
           {item.title && (
