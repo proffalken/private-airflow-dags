@@ -440,14 +440,27 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                                             f"Analyse this Instagram {item['type']} "
                                             f"from the collection {collection_name!r} "
                                             f"and return a JSON object with:\n"
-                                            f'- "tags": a list of 3-8 relevant keyword '
-                                            f"tags (lowercase, no spaces). Include "
-                                            f"relevant caption hashtags and add any "
-                                            f"missing tags that describe the content.\n"
+                                            f'- "tags": a list of 3-8 single-concept '
+                                            f"keyword tags (lowercase, no spaces).\n"
+                                            f"  TAGGING RULES — follow these strictly:\n"
+                                            f"  1. Each tag must represent ONE concept. "
+                                            f"Never combine concepts: use 'christmas' "
+                                            f"and 'food' as separate tags, never "
+                                            f"'christmasfood' or 'foodchristmas'.\n"
+                                            f"  2. Always include a broad category tag "
+                                            f"when the content clearly belongs to one: "
+                                            f"'food', 'music', 'travel', 'fitness', "
+                                            f"'art', 'fashion', 'technology', etc.\n"
+                                            f"  3. Include relevant caption hashtags "
+                                            f"(split any compound hashtags into "
+                                            f"separate tags).\n"
+                                            f"  4. Add specific descriptive tags beyond "
+                                            f"the broad category (e.g. 'chocolate', "
+                                            f"'recipe', 'guitar', 'jazz').\n"
                                             f'- "summary": a one-sentence summary\n\n'
                                             f"{hashtag_hint}"
                                             f"Caption:\n{caption[:2000]}\n\n"
-                                            f"Respond with only valid JSON."
+                                            f"Respond with only valid JSON, no trailing commas."
                                         ),
                                     }],
                                 )
