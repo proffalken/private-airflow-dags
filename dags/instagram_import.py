@@ -42,7 +42,7 @@ def get_instagram_client() -> Client:
     cl = Client()
     cl.delay_range = [1, 3]  # random delay between API calls to avoid rate-limiting
 
-    session_str = Variable.get("INSTAGRAM_SESSION", default_var="")
+    session_str = Variable.get("INSTAGRAM_SESSION", default="")
     if session_str:
         try:
             cl.load_settings(json.loads(session_str))

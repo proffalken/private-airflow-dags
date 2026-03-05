@@ -203,7 +203,7 @@ def _get_instagram_client() -> InstagramClient:
     """Return an authenticated instagrapi Client, reusing a saved session."""
     cl = InstagramClient()
     cl.delay_range = [1, 3]
-    session_str = Variable.get("INSTAGRAM_SESSION", default_var="")
+    session_str = Variable.get("INSTAGRAM_SESSION", default="")
     if session_str:
         try:
             cl.load_settings(json.loads(session_str))
