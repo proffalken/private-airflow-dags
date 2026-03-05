@@ -74,9 +74,6 @@ export function ItemCard({ item }: { item: Item }) {
           )}
 
           <div className="flex items-center gap-3 mt-2 flex-wrap">
-            {item.author && (
-              <span className="text-xs text-gray-500">u/{item.author}</span>
-            )}
             {item.saved_at && (
               <span className="text-xs text-gray-400">
                 {new Date(item.saved_at).toLocaleDateString()}
