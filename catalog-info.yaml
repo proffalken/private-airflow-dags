@@ -1,0 +1,11 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: private-airflow-dags
+  description: Private Airflow DAGs
+  annotations:
+    github.com/project-slug: proffalken/private-airflow-dags
+spec:
+  type: library
+  owner: user:default/proffalken
+  lifecycle: production
