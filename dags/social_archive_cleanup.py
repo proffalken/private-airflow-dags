@@ -11,6 +11,10 @@ import pendulum
 import praw
 import prawcore
 
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+
 from instagrapi import Client as InstagramClient
 from instagrapi.exceptions import LoginRequired, ChallengeRequired
 
@@ -285,6 +289,142 @@ def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
     return cleaned_ids
 
 
+YOUTUBE_WRITE_SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
+YOUTUBE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+
+def _get_youtube_write_client():
+    """Return an authenticated YouTube API client with write scope."""
+    creds = Credentials(
+        token=None,
+        refresh_token=Variable.get("YOUTUBE_REFRESH_TOKEN"),
+        token_uri=YOUTUBE_TOKEN_URI,
+        client_id=Variable.get("YOUTUBE_CLIENT_ID"),
+        client_secret=Variable.get("YOUTUBE_CLIENT_SECRET"),
+        scopes=YOUTUBE_WRITE_SCOPES,
+    )
+    creds.refresh(Request())
+    return build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+
+@task
+def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
+    """Remove flagged YouTube videos from their playlists.
+
+    Uses source_context (playlist name) to locate the correct playlist, then
+    removes the playlistItem entry. Items already removed from the playlist are
+    treated as successfully cleaned. Requires the OAuth token to have been
+    issued with youtube.force-ssl scope (write access).
+    """
+    youtube_items = [i for i in flagged_items if i["source"] == "youtube"]
+
+    if not youtube_items:
+        logger.info("No YouTube items flagged for cleanup")
+        return []
+
+    otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
+    task_provider = create_task_provider(ti.task_id)
+    parent_context = resolve_parent_context(
+        ti, otel_task_tracer, previous_task_id="get_flagged_items"
+    )
+
+    youtube = _get_youtube_write_client()
+    cleaned_ids: list[int] = []
+    failed_ids: list[str] = []
+
+    # Build a name→id map for all user playlists up front (avoids repeated API calls)
+    playlist_name_to_id: dict[str, str] = {}
+    request = youtube.playlists().list(part="snippet", mine=True, maxResults=50)
+    while request:
+        response = request.execute()
+        for pl in response.get("items", []):
+            playlist_name_to_id[pl["snippet"]["title"]] = pl["id"]
+        next_token = response.get("nextPageToken")
+        request = youtube.playlists().list(
+            part="snippet", mine=True, maxResults=50, pageToken=next_token
+        ) if next_token else None
+
+    with task_root_span(ti, task_provider, parent_context) as span:
+        span.set_attribute("youtube.items_to_clean", len(youtube_items))
+
+        for item in youtube_items:
+            video_id = item["external_id"]
+            # source_context is not in the flagged_items query; fetch it now
+            hook = PostgresHook(postgres_conn_id="social_archive_db")
+            row = hook.get_first(
+                "SELECT source_context FROM saved_items WHERE id = %s",
+                parameters=(item["id"],),
+            )
+            playlist_name = row[0] if row else None
+
+            with otel_task_tracer.start_child_span(
+                span_name=f"youtube.remove.{video_id}"
+            ) as item_span:
+                item_span.set_attribute("item.external_id", video_id)
+                item_span.set_attribute("item.playlist", playlist_name or "")
+
+                if not playlist_name or playlist_name not in playlist_name_to_id:
+                    logger.warning(
+                        f"Playlist {playlist_name!r} not found for video {video_id}; "
+                        f"removing from archive regardless"
+                    )
+                    cleaned_ids.append(item["id"])
+                    continue
+
+                playlist_id = playlist_name_to_id[playlist_name]
+
+                # Find the playlistItem ID for this video in this playlist
+                try:
+                    pi_response = youtube.playlistItems().list(
+                        part="id",
+                        playlistId=playlist_id,
+                        videoId=video_id,
+                        maxResults=1,
+                    ).execute()
+                    pi_items = pi_response.get("items", [])
+                except Exception as exc:
+                    logger.error(
+                        f"Failed to look up playlistItem for video {video_id} "
+                        f"in playlist {playlist_name!r}: {exc}"
+                    )
+                    item_span.set_attribute("error", str(exc))
+                    failed_ids.append(video_id)
+                    continue
+
+                if not pi_items:
+                    # Already removed from the playlist
+                    logger.warning(
+                        f"Video {video_id} not found in playlist {playlist_name!r} "
+                        f"(already removed?); removing from archive regardless"
+                    )
+                    cleaned_ids.append(item["id"])
+                    continue
+
+                playlist_item_id = pi_items[0]["id"]
+                try:
+                    youtube.playlistItems().delete(id=playlist_item_id).execute()
+                    cleaned_ids.append(item["id"])
+                    logger.info(
+                        f"Removed video {video_id} from playlist {playlist_name!r}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Failed to remove video {video_id} from playlist "
+                        f"{playlist_name!r}: {exc}"
+                    )
+                    item_span.set_attribute("error", str(exc))
+                    failed_ids.append(video_id)
+
+        span.set_attribute("youtube.items_cleaned", len(cleaned_ids))
+        span.set_attribute("youtube.items_failed", len(failed_ids))
+        logger.info(
+            f"YouTube cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed"
+        )
+
+    task_provider.force_flush()
+    return cleaned_ids
+
+
 @task
 def remove_cleaned_items(cleaned_id_lists: list[list[int]], ti) -> None:
     """Delete successfully cleaned items from the archive database.
@@ -333,10 +473,11 @@ def social_archive_cleanup():
 
     reddit_cleaned = cleanup_reddit(flagged)
     instagram_cleaned = cleanup_instagram(flagged)
+    youtube_cleaned = cleanup_youtube(flagged)
     # Add new sources here, e.g.:
     #   mastodon_cleaned = cleanup_mastodon(flagged)
 
-    remove_cleaned_items([reddit_cleaned, instagram_cleaned])
+    remove_cleaned_items([reddit_cleaned, instagram_cleaned, youtube_cleaned])
 
 
 social_archive_cleanup()
