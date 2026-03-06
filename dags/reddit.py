@@ -363,6 +363,7 @@ def analyse_and_store(sorted_posts, ti):
 
 
 @dag(
+    schedule=timedelta(hours=3),
     start_date=pendulum.datetime(2025, 8, 30, tz="UTC"),
     catchup=False,
 )
