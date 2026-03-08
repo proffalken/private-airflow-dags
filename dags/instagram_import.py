@@ -12,7 +12,7 @@ import pendulum
 
 from instagrapi import Client
 from instagrapi import extractors as _ig_extractors
-from instagrapi.exceptions import LoginRequired, ChallengeRequired
+from instagrapi.exceptions import LoginRequired, ChallengeRequired, ClientError
 
 # Monkey-patch: extract_resource_v1 crashes with IndexError when
 # image_versions2.candidates is an empty list (happens with Reels/newer formats
@@ -286,7 +286,14 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
                 with otel_task_tracer.start_child_span(
                     span_name=f"fetch_collection.{collection.id}"
                 ):
-                    medias = cl.collection_medias(collection.id, amount=0)
+                    try:
+                        medias = cl.collection_medias(collection.id, amount=200)
+                    except ClientError as exc:
+                        logger.warning(
+                            f"Instagram rate-limited while fetching collection "
+                            f"{collection_name!r}: {exc}. Skipping collection."
+                        )
+                        continue
 
                 for media in medias:
                     pk_str = str(media.pk)
@@ -314,7 +321,14 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
         uncollected_count = 0
         if all_posts_collection:
             with otel_task_tracer.start_child_span(span_name="fetch_uncollected_saves"):
-                medias = cl.collection_medias(all_posts_collection.id, amount=0)
+                try:
+                    medias = cl.collection_medias(all_posts_collection.id, amount=200)
+                except ClientError as exc:
+                    logger.warning(
+                        f"Instagram rate-limited while fetching all-posts collection: {exc}. "
+                        f"Skipping uncollected saves this run."
+                    )
+                    medias = []
 
                 for media in medias:
                     pk_str = str(media.pk)
