@@ -10,6 +10,7 @@ from typing import Iterator
 import pendulum
 import praw
 import prawcore
+import requests
 
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -426,6 +427,97 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
 
 
 @task
+def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
+    """Unstar flagged GitHub repos from the authenticated user's starred list.
+
+    Calls DELETE /user/starred/{owner}/{repo} for each item. Repos that no
+    longer exist (404) are treated as successfully cleaned. Transient errors
+    are logged and retried on the next run.
+    """
+    github_items = [i for i in flagged_items if i["source"] == "github"]
+
+    if not github_items:
+        logger.info("No GitHub items flagged for cleanup")
+        return []
+
+    otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
+    task_provider = create_task_provider(ti.task_id)
+    parent_context = resolve_parent_context(
+        ti, otel_task_tracer, previous_task_id="get_flagged_items"
+    )
+
+    token = Variable.get("GITHUB_TOKEN")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    hook = PostgresHook(postgres_conn_id="social_archive_db")
+    cleaned_ids: list[int] = []
+    failed_ids: list[str] = []
+
+    with task_root_span(ti, task_provider, parent_context) as span:
+        span.set_attribute("github.items_to_clean", len(github_items))
+
+        for item in github_items:
+            external_id = item["external_id"]
+
+            # title is stored as "owner/repo" (full_name)
+            row = hook.get_first(
+                "SELECT title FROM saved_items WHERE id = %s",
+                parameters=(item["id"],),
+            )
+            full_name = row[0] if row else None
+
+            with otel_task_tracer.start_child_span(
+                span_name=f"github.unstar.{external_id}"
+            ) as item_span:
+                item_span.set_attribute("item.external_id", external_id)
+                item_span.set_attribute("item.full_name", full_name or "")
+
+                if not full_name or "/" not in full_name:
+                    logger.warning(
+                        f"Cannot unstar GitHub repo {external_id}: "
+                        f"no valid full_name {full_name!r}; removing from archive regardless"
+                    )
+                    cleaned_ids.append(item["id"])
+                    continue
+
+                try:
+                    response = requests.delete(
+                        f"https://api.github.com/user/starred/{full_name}",
+                        headers=headers,
+                        timeout=30,
+                    )
+                    if response.status_code in (204, 404):
+                        # 204 = successfully unstarred; 404 = repo gone, nothing to unstar
+                        if response.status_code == 404:
+                            logger.warning(
+                                f"GitHub repo {full_name} not found (deleted?); "
+                                f"removing from archive regardless"
+                            )
+                        else:
+                            logger.info(f"Unstarred GitHub repo {full_name}")
+                        cleaned_ids.append(item["id"])
+                    else:
+                        response.raise_for_status()
+
+                except Exception as exc:
+                    logger.error(f"Failed to unstar GitHub repo {full_name}: {exc}")
+                    item_span.set_attribute("error", str(exc))
+                    failed_ids.append(external_id)
+
+        span.set_attribute("github.items_cleaned", len(cleaned_ids))
+        span.set_attribute("github.items_failed", len(failed_ids))
+        logger.info(
+            f"GitHub cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed"
+        )
+
+    task_provider.force_flush()
+    return cleaned_ids
+
+
+@task
 def remove_cleaned_items(cleaned_id_lists: list[list[int]], ti) -> None:
     """Delete successfully cleaned items from the archive database.
 
@@ -474,10 +566,9 @@ def social_archive_cleanup():
     reddit_cleaned = cleanup_reddit(flagged)
     instagram_cleaned = cleanup_instagram(flagged)
     youtube_cleaned = cleanup_youtube(flagged)
-    # Add new sources here, e.g.:
-    #   mastodon_cleaned = cleanup_mastodon(flagged)
+    github_cleaned = cleanup_github(flagged)
 
-    remove_cleaned_items([reddit_cleaned, instagram_cleaned, youtube_cleaned])
+    remove_cleaned_items([reddit_cleaned, instagram_cleaned, youtube_cleaned, github_cleaned])
 
 
 social_archive_cleanup()
