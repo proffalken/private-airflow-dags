@@ -223,6 +223,8 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
 
             language = repo.get("language") or "other"
             topics = [t.lower() for t in (repo.get("topics") or [])]
+            is_private = repo.get("private", False)
+            is_archived = repo.get("archived", False)
 
             sorted_repos.setdefault(language, []).append({
                 "external_id": repo_id,
@@ -233,6 +235,8 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
                 "language": language,
                 "topics": topics,
                 "stargazers_count": repo.get("stargazers_count", 0),
+                "visibility": "private" if is_private else "public",
+                "archived": is_archived,
             })
             new_count += 1
 
@@ -306,10 +310,13 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                             full_name = item["title"]
                             description = item["body"]
                             topics = item.get("topics", [])
+                            visibility = item.get("visibility", "public")
+                            is_archived = item.get("archived", False)
 
                             logger.info(
                                 f"Analysing: {full_name!r} "
-                                f"(language={language!r}, stars={item['stargazers_count']})"
+                                f"(language={language!r}, stars={item['stargazers_count']}, "
+                                f"visibility={visibility}, archived={is_archived})"
                             )
 
                             with otel_task_tracer.start_child_span(
@@ -359,9 +366,10 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                                 analysis = _parse_llm_json(raw, repo_id)
 
                             llm_tags = analysis.get("tags", [])
-                            # language tag → GitHub topics → LLM tags (deduplicated)
+                            # language tag → visibility → archived (if set) → GitHub topics → LLM tags (deduplicated)
+                            status_tags = [visibility] + (["archived"] if is_archived else [])
                             merged_tags = list(dict.fromkeys(
-                                [language_tag] + topics + llm_tags
+                                [language_tag] + status_tags + topics + llm_tags
                             ))
                             llm_span.set_attribute("item.tags", str(merged_tags))
 
