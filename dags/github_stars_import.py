@@ -143,6 +143,7 @@ def _fetch_all_starred_repos(token: str) -> list[dict]:
     }
     url = "https://api.github.com/user/starred"
     params = {"per_page": 100, "page": 1}
+    page = 1
 
     while url:
         response = requests.get(url, headers=headers, params=params, timeout=30)
@@ -151,7 +152,8 @@ def _fetch_all_starred_repos(token: str) -> list[dict]:
         if not batch:
             break
         repos.extend(batch)
-        logger.info(f"Fetched page {params['page']}: {len(batch)} repos (total so far: {len(repos)})")
+        logger.info(f"Fetched page {page}: {len(batch)} repos (total so far: {len(repos)})")
+        page += 1
 
         # Follow Link header for next page
         link_header = response.headers.get("Link", "")
