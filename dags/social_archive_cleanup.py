@@ -212,8 +212,13 @@ def _get_instagram_client() -> InstagramClient:
     if session_str:
         try:
             cl.load_settings(json.loads(session_str))
+            cl.get_timeline_feed()  # verify session is still valid
+            logger.info("Reused existing Instagram session — no login required")
+            return cl
+        except LoginRequired:
+            logger.warning("Stored Instagram session expired, performing fresh login")
         except Exception as exc:
-            logger.warning(f"Could not load Instagram session: {exc}")
+            logger.warning(f"Could not verify stored session ({exc}), performing fresh login")
     try:
         cl.login(
             Variable.get("INSTAGRAM_USERNAME"),

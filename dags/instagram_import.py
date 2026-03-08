@@ -82,7 +82,11 @@ _MEDIA_TYPE_NAMES = {1: "photo", 2: "video", 8: "album"}
 
 
 def get_instagram_client() -> Client:
-    """Return an authenticated instagrapi Client, reusing a saved session where possible."""
+    """Return an authenticated instagrapi Client, reusing a saved session where possible.
+
+    Avoids a full re-login (and the resulting "new device" email) by verifying
+    the stored session with a lightweight API call before falling back to login().
+    """
     cl = Client()
     cl.delay_range = [1, 3]  # random delay between API calls to avoid rate-limiting
 
@@ -90,9 +94,13 @@ def get_instagram_client() -> Client:
     if session_str:
         try:
             cl.load_settings(json.loads(session_str))
-            logger.info("Loaded existing Instagram session")
+            cl.get_timeline_feed()  # verify session is still valid
+            logger.info("Reused existing Instagram session — no login required")
+            return cl
+        except LoginRequired:
+            logger.warning("Stored Instagram session expired, performing fresh login")
         except Exception as exc:
-            logger.warning(f"Could not load session, will do fresh login: {exc}")
+            logger.warning(f"Could not verify stored session ({exc}), performing fresh login")
 
     try:
         cl.login(
