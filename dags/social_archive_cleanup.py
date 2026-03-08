@@ -34,13 +34,15 @@ from airflow.traces.tracer import Trace
 
 logger = logging.getLogger("airflow.social_archive_cleanup")
 
-reddit = praw.Reddit(
-    client_id=Variable.get("REDDIT_CLIENT_ID"),
-    client_secret=Variable.get("REDDIT_CLIENT_SECRET"),
-    user_agent="proffalken-airflow",
-    username=Variable.get("REDDIT_USER"),
-    password=Variable.get("REDDIT_PASSWORD"),
-)
+
+def _get_reddit_client():
+    return praw.Reddit(
+        client_id=Variable.get("REDDIT_CLIENT_ID"),
+        client_secret=Variable.get("REDDIT_CLIENT_SECRET"),
+        user_agent="proffalken-airflow",
+        username=Variable.get("REDDIT_USER"),
+        password=Variable.get("REDDIT_PASSWORD"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +155,7 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
 
     cleaned_ids: list[int] = []
     failed_ids: list[str] = []
+    reddit = _get_reddit_client()
 
     with task_root_span(ti, task_provider, parent_context) as span:
         span.set_attribute("reddit.items_to_clean", len(reddit_items))
