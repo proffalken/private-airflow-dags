@@ -214,7 +214,7 @@ def _get_instagram_client() -> InstagramClient:
     session_str = Variable.get("INSTAGRAM_SESSION", default="")
     if session_str:
         try:
-            cl.load_settings(json.loads(session_str))
+            cl.set_settings(json.loads(session_str))
             logger.info("Loaded existing Instagram session")
             return cl
         except Exception as exc:
