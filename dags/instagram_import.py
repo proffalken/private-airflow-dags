@@ -84,8 +84,9 @@ _MEDIA_TYPE_NAMES = {1: "photo", 2: "video", 8: "album"}
 def get_instagram_client() -> Client:
     """Return an authenticated instagrapi Client, reusing a saved session where possible.
 
-    Avoids a full re-login (and the resulting "new device" email) by verifying
-    the stored session with a lightweight API call before falling back to login().
+    Loads the stored session and returns immediately without making any
+    verification API call. If the session has expired the real API calls in
+    the task will raise LoginRequired, which is handled there.
     """
     cl = Client()
     cl.delay_range = [1, 3]  # random delay between API calls to avoid rate-limiting
@@ -94,13 +95,10 @@ def get_instagram_client() -> Client:
     if session_str:
         try:
             cl.load_settings(json.loads(session_str))
-            cl.get_timeline_feed()  # verify session is still valid
-            logger.info("Reused existing Instagram session — no login required")
+            logger.info("Loaded existing Instagram session")
             return cl
-        except LoginRequired:
-            logger.warning("Stored Instagram session expired, performing fresh login")
         except Exception as exc:
-            logger.warning(f"Could not verify stored session ({exc}), performing fresh login")
+            logger.warning(f"Could not load session ({exc}), performing fresh login")
 
     try:
         cl.login(
@@ -547,7 +545,7 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
 # ---------------------------------------------------------------------------
 
 @dag(
-    schedule=timedelta(hours=3),
+    schedule=timedelta(hours=24),
     start_date=pendulum.datetime(2025, 8, 30, tz="UTC"),
     catchup=False,
 )
