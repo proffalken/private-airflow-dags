@@ -327,7 +327,7 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
         ti, otel_task_tracer, previous_task_id="get_playlist_videos"
     )
 
-    client = OpenAI(base_url="http://ollama.geeohh.svc.cluster.local:11434/v1", api_key="ollama")
+    client = OpenAI(base_url="http://ollama.ollama.svc.cluster.local:11434/v1", api_key="ollama")
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
     with task_root_span(ti, task_provider, parent_context):
