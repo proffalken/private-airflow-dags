@@ -1,4 +1,4 @@
-FROM apache/airflow:3.0.2
+FROM apache/airflow:3.1.8
 
 # Install additional Python packages required by DAGs in this repo.
 # EDIT: Add any new packages here as new --find-links or on a new RUN line.
