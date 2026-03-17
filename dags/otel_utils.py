@@ -131,7 +131,7 @@ def instrument_llm(task_provider: TracerProvider) -> None:
     global _llm_instrumented
     if _llm_instrumented:
         return
-    from opentelemetry.instrumentation.openai import OpenAIInstrumentor  # noqa: PLC0415
+    from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor  # noqa: PLC0415
     OpenAIInstrumentor().instrument(tracer_provider=task_provider)
     _llm_instrumented = True
 
