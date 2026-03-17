@@ -1,28 +1,15 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import timedelta
-import json
 import logging
-import os
 import re
-from typing import Iterator
 
 import pendulum
 import requests
 
-from openai import OpenAI
+import requests
 
-from opentelemetry import trace
-from opentelemetry.propagate import inject, extract as otel_extract
-from opentelemetry.trace import SpanKind
-from opentelemetry.sdk.resources import Resource, SERVICE_NAME
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from openai import OpenAI
 
 from airflow.exceptions import AirflowSkipException
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -30,103 +17,15 @@ from airflow.sdk import dag, task, Variable
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
+from otel_utils import (
+    create_task_provider,
+    create_meter_provider,
+    resolve_parent_context,
+    task_root_span,
+    parse_llm_json,
+)
+
 logger = logging.getLogger("airflow.github_stars_dag")
-
-
-# ---------------------------------------------------------------------------
-# OTEL helpers (same pattern as reddit.py / youtube_import.py)
-# ---------------------------------------------------------------------------
-
-def create_task_provider(task_id: str) -> TracerProvider:
-    host = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_HOST"]
-    port = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_PORT_OTLP_HTTP"]
-    endpoint = f"http://{host}:{port}/v1/traces"
-    resource = Resource.create({SERVICE_NAME: task_id})
-    provider = TracerProvider(resource=resource)
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
-    return provider
-
-
-def create_meter_provider(task_id: str) -> MeterProvider:
-    host = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_HOST"]
-    port = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_PORT_OTLP_HTTP"]
-    endpoint = f"http://{host}:{port}/v1/metrics"
-    resource = Resource.create({SERVICE_NAME: task_id})
-    exporter = OTLPMetricExporter(endpoint=endpoint)
-    reader = PeriodicExportingMetricReader(exporter)
-    return MeterProvider(resource=resource, metric_readers=[reader])
-
-
-def resolve_parent_context(ti, otel_task_tracer, previous_task_id=None):
-    if previous_task_id:
-        carrier = ti.xcom_pull(task_ids=previous_task_id, key="otel_context")
-        if carrier:
-            logger.info(f"✓ Using handoff context from {previous_task_id}: {carrier}")
-            return otel_extract(carrier)
-        logger.warning(f"⚠ No XCom handoff from {previous_task_id}, falling back to Airflow carrier")
-    if ti.context_carrier is not None:
-        logger.info(f"✓ Using Airflow context carrier: {ti.context_carrier}")
-        return otel_task_tracer.extract(ti.context_carrier)
-    logger.error("❌ No parent context available")
-    return None
-
-
-@contextmanager
-def task_root_span(ti, task_provider, parent_context) -> Iterator:
-    tracer = trace.get_tracer(ti.task_id, tracer_provider=task_provider)
-    with tracer.start_as_current_span(
-        f"dag.{ti.dag_id}.task.{ti.task_id}",
-        context=parent_context,
-        kind=SpanKind.CONSUMER,
-    ) as span:
-        span.set_attribute("airflow.dag_id", ti.dag_id)
-        span.set_attribute("airflow.task_id", ti.task_id)
-        span.set_attribute("airflow.run_id", ti.run_id)
-        yield span
-        with tracer.start_as_current_span(
-            f"task.{ti.task_id}.trigger_next",
-            kind=SpanKind.PRODUCER,
-        ):
-            carrier = {}
-            inject(carrier)
-            ti.xcom_push(key="otel_context", value=carrier)
-            logger.info(f"✓ Handoff context pushed to XCom: {carrier}")
-
-
-def _parse_llm_json(raw: str, item_id: str) -> dict:
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        end = -1 if lines[-1].strip() == "```" else len(lines)
-        text = "\n".join(lines[1:end]).strip()
-    text = re.sub(r",\s*([}\]])", r"\1", text)
-
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.warning(f"LLM response for {item_id} is not valid JSON ({exc}); raw={raw!r:.200}")
-        return {"tags": [], "summary": ""}
-
-    if isinstance(data, list):
-        dicts = [x for x in data if isinstance(x, dict)]
-        if not dicts:
-            logger.warning(f"LLM response for {item_id} is a list with no dicts; raw={raw!r:.200}")
-            return {"tags": [], "summary": ""}
-        data = dicts[0]
-
-    if not isinstance(data, dict):
-        logger.warning(f"LLM response for {item_id} is {type(data).__name__}, not dict; raw={raw!r:.200}")
-        return {"tags": [], "summary": ""}
-
-    tags = data.get("tags", [])
-    if isinstance(tags, str):
-        tags = [t.strip().lower() for t in tags.replace(",", " ").split() if t.strip()]
-    elif not isinstance(tags, list):
-        tags = []
-    else:
-        tags = [str(t).strip().lower() for t in tags if t]
-
-    return {"tags": tags, "summary": str(data.get("summary") or "")}
 
 
 # ---------------------------------------------------------------------------
@@ -186,14 +85,15 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
     logger.info(f"Getting GitHub starred repos — DAG: {ti.dag_id}, Run: {ti.run_id}")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
-    meter_provider = create_meter_provider(ti.task_id)
+    task_provider = create_task_provider("github-stars-import", ti.run_id)
+    meter_provider = create_meter_provider("github-stars-import", ti.run_id)
     parent_context = resolve_parent_context(ti, otel_task_tracer)
 
     meter = meter_provider.get_meter("github.stars")
     repo_gauge = meter.create_gauge(
         "github.stars.repo_count",
-        description="Number of new GitHub starred repos",
+        unit="1",
+        description="Number of new GitHub starred repos fetched in this run",
     )
 
     try:
@@ -243,11 +143,9 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
         span.set_attribute("github.new_repos", new_count)
         logger.info(f"=== {new_count} new GitHub starred repos to process")
 
-    attrs = {"dag_id": ti.dag_id, "run_id": ti.run_id}
-    repo_gauge.set(new_count, attrs)
+    repo_gauge.set(new_count)
     task_provider.force_flush()
     meter_provider.force_flush()
-    meter_provider.shutdown()
     return sorted_repos
 
 
@@ -269,7 +167,7 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
         raise AirflowSkipException("No new GitHub starred repos to analyse")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
+    task_provider = create_task_provider("github-stars-import", ti.run_id)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_starred_repos"
     )
@@ -363,7 +261,7 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                                 )
 
                                 raw = response.choices[0].message.content or ""
-                                analysis = _parse_llm_json(raw, repo_id)
+                                analysis = parse_llm_json(raw, repo_id)
 
                             llm_tags = analysis.get("tags", [])
                             # language tag → visibility → archived (if set) → GitHub topics → LLM tags (deduplicated)

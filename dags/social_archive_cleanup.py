@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import timedelta
 import json
 import logging
-import os
-from typing import Iterator
 
 import pendulum
 import praw
@@ -19,18 +16,19 @@ from google.auth.transport.requests import Request
 from instagrapi import Client as InstagramClient
 from instagrapi.exceptions import LoginRequired, ChallengeRequired
 
-from opentelemetry import trace
-from opentelemetry.propagate import inject, extract as otel_extract
-from opentelemetry.trace import SpanKind
-from opentelemetry.sdk.resources import Resource, SERVICE_NAME
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+import requests
 
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import dag, task, Variable
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
+
+from otel_utils import (
+    create_task_provider,
+    create_meter_provider,
+    resolve_parent_context,
+    task_root_span,
+)
 
 logger = logging.getLogger("airflow.social_archive_cleanup")
 
@@ -46,59 +44,6 @@ def _get_reddit_client():
 
 
 # ---------------------------------------------------------------------------
-# OTEL helpers (same pattern as reddit.py)
-# ---------------------------------------------------------------------------
-
-def create_task_provider(task_id: str) -> TracerProvider:
-    host = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_HOST"]
-    port = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_PORT_OTLP_HTTP"]
-    endpoint = f"http://{host}:{port}/v1/traces"
-    logger.info(f"Creating task provider for '{task_id}' exporting to {endpoint}")
-    resource = Resource.create({SERVICE_NAME: task_id})
-    provider = TracerProvider(resource=resource)
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
-    return provider
-
-
-def resolve_parent_context(ti, otel_task_tracer, previous_task_id=None):
-    if previous_task_id:
-        carrier = ti.xcom_pull(task_ids=previous_task_id, key="otel_context")
-        if carrier:
-            logger.info(f"✓ Using handoff context from {previous_task_id}: {carrier}")
-            return otel_extract(carrier)
-        logger.warning(f"⚠ No XCom handoff from {previous_task_id}, falling back to Airflow carrier")
-
-    if ti.context_carrier is not None:
-        logger.info(f"✓ Using Airflow context carrier: {ti.context_carrier}")
-        return otel_task_tracer.extract(ti.context_carrier)
-
-    logger.error("❌ No parent context available")
-    return None
-
-
-@contextmanager
-def task_root_span(ti, task_provider, parent_context) -> Iterator:
-    tracer = trace.get_tracer(ti.task_id, tracer_provider=task_provider)
-    with tracer.start_as_current_span(
-        f"dag.{ti.dag_id}.task.{ti.task_id}",
-        context=parent_context,
-        kind=SpanKind.CONSUMER,
-    ) as span:
-        span.set_attribute("airflow.dag_id", ti.dag_id)
-        span.set_attribute("airflow.task_id", ti.task_id)
-        span.set_attribute("airflow.run_id", ti.run_id)
-        yield span
-        with tracer.start_as_current_span(
-            f"task.{ti.task_id}.trigger_next",
-            kind=SpanKind.PRODUCER,
-        ):
-            carrier = {}
-            inject(carrier)
-            ti.xcom_push(key="otel_context", value=carrier)
-            logger.info(f"✓ Handoff context pushed to XCom: {carrier}")
-
-
-# ---------------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------------
 
@@ -106,8 +51,16 @@ def task_root_span(ti, task_provider, parent_context) -> Iterator:
 def get_flagged_items(ti) -> list[dict]:
     """Fetch all items flagged for deletion from the archive database."""
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
     parent_context = resolve_parent_context(ti, otel_task_tracer)
+
+    meter = meter_provider.get_meter("social.archive.cleanup")
+    flagged_gauge = meter.create_gauge(
+        "social.archive.cleanup.flagged",
+        unit="1",
+        description="Number of items flagged for deletion at the start of this cleanup run",
+    )
 
     with task_root_span(ti, task_provider, parent_context) as span:
         hook = PostgresHook(postgres_conn_id="social_archive_db")
@@ -119,14 +72,18 @@ def get_flagged_items(ti) -> list[dict]:
             {"id": r[0], "source": r[1], "external_id": r[2], "type": r[3]}
             for r in rows
         ]
-        by_source = {}
+        by_source: dict[str, int] = {}
         for item in items:
             by_source.setdefault(item["source"], 0)
             by_source[item["source"]] += 1
         span.set_attribute("flagged.total", len(items))
         logger.info(f"Found {len(items)} items flagged for deletion: {by_source}")
 
+    for source, count in by_source.items():
+        flagged_gauge.set(count, {"source": source})
+
     task_provider.force_flush()
+    meter_provider.force_flush()
     return items
 
 
@@ -148,9 +105,22 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_flagged_items"
+    )
+
+    meter = meter_provider.get_meter("social.archive.cleanup")
+    cleaned_gauge = meter.create_gauge(
+        "social.archive.cleanup.cleaned",
+        unit="1",
+        description="Number of items successfully cleaned from the source platform in this run",
+    )
+    failed_gauge = meter.create_gauge(
+        "social.archive.cleanup.failed",
+        unit="1",
+        description="Number of items that failed cleanup from the source platform in this run",
     )
 
     cleaned_ids: list[int] = []
@@ -160,28 +130,22 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
     with task_root_span(ti, task_provider, parent_context) as span:
         span.set_attribute("reddit.items_to_clean", len(reddit_items))
 
-        for item in reddit_items:
-            external_id = item["external_id"]
-            item_type = item["type"]
+        with otel_task_tracer.start_child_span(span_name="reddit.unsave batch") as batch_span:
+            batch_span.set_attribute("batch.size", len(reddit_items))
 
-            with otel_task_tracer.start_child_span(
-                span_name=f"reddit.unsave.{external_id}"
-            ) as item_span:
-                item_span.set_attribute("item.external_id", external_id)
-                item_span.set_attribute("item.type", item_type)
-
+            for item in reddit_items:
+                external_id = item["external_id"]
+                item_type = item["type"]
                 try:
                     if item_type == "post":
                         reddit.submission(id=external_id).unsave()
                     else:
                         reddit.comment(id=external_id).unsave()
-
                     cleaned_ids.append(item["id"])
                     logger.info(f"Unsaved Reddit {item_type} {external_id}")
 
                 except prawcore.exceptions.NotFound:
-                    # Post/comment already deleted from Reddit; nothing to unsave,
-                    # but it's safe to remove from our archive.
+                    # Post/comment already deleted from Reddit — safe to remove from archive.
                     logger.warning(
                         f"Reddit {item_type} {external_id} not found on Reddit "
                         f"(deleted by OP?); removing from archive regardless"
@@ -189,21 +153,27 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
                     cleaned_ids.append(item["id"])
 
                 except Exception as exc:
-                    # Transient error (network, rate-limit, auth); leave in DB
-                    # so the next run can retry.
+                    # Transient error (network, rate-limit, auth); leave in DB for retry.
                     logger.error(
                         f"Failed to unsave Reddit {item_type} {external_id}: {exc}"
                     )
-                    item_span.set_attribute("error", str(exc))
+                    batch_span.add_event(
+                        "item.failed",
+                        {"item.external_id": external_id, "item.type": item_type, "error": str(exc)},
+                    )
                     failed_ids.append(external_id)
+
+            batch_span.set_attribute("batch.cleaned", len(cleaned_ids))
+            batch_span.set_attribute("batch.failed", len(failed_ids))
 
         span.set_attribute("reddit.items_cleaned", len(cleaned_ids))
         span.set_attribute("reddit.items_failed", len(failed_ids))
-        logger.info(
-            f"Reddit cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed"
-        )
+        logger.info(f"Reddit cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed")
 
+    cleaned_gauge.set(len(cleaned_ids), {"source": "reddit"})
+    failed_gauge.set(len(failed_ids), {"source": "reddit"})
     task_provider.force_flush()
+    meter_provider.force_flush()
     return cleaned_ids
 
 
@@ -245,9 +215,22 @@ def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_flagged_items"
+    )
+
+    meter = meter_provider.get_meter("social.archive.cleanup")
+    cleaned_gauge = meter.create_gauge(
+        "social.archive.cleanup.cleaned",
+        unit="1",
+        description="Number of items successfully cleaned from the source platform in this run",
+    )
+    failed_gauge = meter.create_gauge(
+        "social.archive.cleanup.failed",
+        unit="1",
+        description="Number of items that failed cleanup from the source platform in this run",
     )
 
     cl = _get_instagram_client()
@@ -257,16 +240,12 @@ def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
     with task_root_span(ti, task_provider, parent_context) as span:
         span.set_attribute("instagram.items_to_clean", len(instagram_items))
 
-        for item in instagram_items:
-            external_id = item["external_id"]
-            item_type = item["type"]
+        with otel_task_tracer.start_child_span(span_name="instagram.unsave batch") as batch_span:
+            batch_span.set_attribute("batch.size", len(instagram_items))
 
-            with otel_task_tracer.start_child_span(
-                span_name=f"instagram.unsave.{external_id}"
-            ) as item_span:
-                item_span.set_attribute("item.external_id", external_id)
-                item_span.set_attribute("item.type", item_type)
-
+            for item in instagram_items:
+                external_id = item["external_id"]
+                item_type = item["type"]
                 try:
                     cl.media_unsave(external_id)
                     cleaned_ids.append(item["id"])
@@ -282,16 +261,23 @@ def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
                         cleaned_ids.append(item["id"])
                     else:
                         logger.error(f"Failed to unsave Instagram {item_type} {external_id}: {exc}")
-                        item_span.set_attribute("error", str(exc))
+                        batch_span.add_event(
+                            "item.failed",
+                            {"item.external_id": external_id, "item.type": item_type, "error": str(exc)},
+                        )
                         failed_ids.append(external_id)
+
+            batch_span.set_attribute("batch.cleaned", len(cleaned_ids))
+            batch_span.set_attribute("batch.failed", len(failed_ids))
 
         span.set_attribute("instagram.items_cleaned", len(cleaned_ids))
         span.set_attribute("instagram.items_failed", len(failed_ids))
-        logger.info(
-            f"Instagram cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed"
-        )
+        logger.info(f"Instagram cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed")
 
+    cleaned_gauge.set(len(cleaned_ids), {"source": "instagram"})
+    failed_gauge.set(len(failed_ids), {"source": "instagram"})
     task_provider.force_flush()
+    meter_provider.force_flush()
     return cleaned_ids
 
 
@@ -329,9 +315,22 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_flagged_items"
+    )
+
+    meter = meter_provider.get_meter("social.archive.cleanup")
+    cleaned_gauge = meter.create_gauge(
+        "social.archive.cleanup.cleaned",
+        unit="1",
+        description="Number of items successfully cleaned from the source platform in this run",
+    )
+    failed_gauge = meter.create_gauge(
+        "social.archive.cleanup.failed",
+        unit="1",
+        description="Number of items that failed cleanup from the source platform in this run",
     )
 
     youtube = _get_youtube_write_client()
@@ -350,24 +349,21 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
             part="snippet", mine=True, maxResults=50, pageToken=next_token
         ) if next_token else None
 
+    hook = PostgresHook(postgres_conn_id="social_archive_db")
+
     with task_root_span(ti, task_provider, parent_context) as span:
         span.set_attribute("youtube.items_to_clean", len(youtube_items))
 
-        for item in youtube_items:
-            video_id = item["external_id"]
-            # source_context is not in the flagged_items query; fetch it now
-            hook = PostgresHook(postgres_conn_id="social_archive_db")
-            row = hook.get_first(
-                "SELECT source_context FROM saved_items WHERE id = %s",
-                parameters=(item["id"],),
-            )
-            playlist_name = row[0] if row else None
+        with otel_task_tracer.start_child_span(span_name="youtube.remove batch") as batch_span:
+            batch_span.set_attribute("batch.size", len(youtube_items))
 
-            with otel_task_tracer.start_child_span(
-                span_name=f"youtube.remove.{video_id}"
-            ) as item_span:
-                item_span.set_attribute("item.external_id", video_id)
-                item_span.set_attribute("item.playlist", playlist_name or "")
+            for item in youtube_items:
+                video_id = item["external_id"]
+                row = hook.get_first(
+                    "SELECT source_context FROM saved_items WHERE id = %s",
+                    parameters=(item["id"],),
+                )
+                playlist_name = row[0] if row else None
 
                 if not playlist_name or playlist_name not in playlist_name_to_id:
                     logger.warning(
@@ -378,8 +374,6 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
                     continue
 
                 playlist_id = playlist_name_to_id[playlist_name]
-
-                # Find the playlistItem ID for this video in this playlist
                 try:
                     pi_response = youtube.playlistItems().list(
                         part="id",
@@ -393,12 +387,14 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
                         f"Failed to look up playlistItem for video {video_id} "
                         f"in playlist {playlist_name!r}: {exc}"
                     )
-                    item_span.set_attribute("error", str(exc))
+                    batch_span.add_event(
+                        "item.failed",
+                        {"item.external_id": video_id, "item.playlist": playlist_name or "", "error": str(exc)},
+                    )
                     failed_ids.append(video_id)
                     continue
 
                 if not pi_items:
-                    # Already removed from the playlist
                     logger.warning(
                         f"Video {video_id} not found in playlist {playlist_name!r} "
                         f"(already removed?); removing from archive regardless"
@@ -410,24 +406,28 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
                 try:
                     youtube.playlistItems().delete(id=playlist_item_id).execute()
                     cleaned_ids.append(item["id"])
-                    logger.info(
-                        f"Removed video {video_id} from playlist {playlist_name!r}"
-                    )
+                    logger.info(f"Removed video {video_id} from playlist {playlist_name!r}")
                 except Exception as exc:
                     logger.error(
-                        f"Failed to remove video {video_id} from playlist "
-                        f"{playlist_name!r}: {exc}"
+                        f"Failed to remove video {video_id} from playlist {playlist_name!r}: {exc}"
                     )
-                    item_span.set_attribute("error", str(exc))
+                    batch_span.add_event(
+                        "item.failed",
+                        {"item.external_id": video_id, "item.playlist": playlist_name or "", "error": str(exc)},
+                    )
                     failed_ids.append(video_id)
+
+            batch_span.set_attribute("batch.cleaned", len(cleaned_ids))
+            batch_span.set_attribute("batch.failed", len(failed_ids))
 
         span.set_attribute("youtube.items_cleaned", len(cleaned_ids))
         span.set_attribute("youtube.items_failed", len(failed_ids))
-        logger.info(
-            f"YouTube cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed"
-        )
+        logger.info(f"YouTube cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed")
 
+    cleaned_gauge.set(len(cleaned_ids), {"source": "youtube"})
+    failed_gauge.set(len(failed_ids), {"source": "youtube"})
     task_provider.force_flush()
+    meter_provider.force_flush()
     return cleaned_ids
 
 
@@ -446,9 +446,22 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_flagged_items"
+    )
+
+    meter = meter_provider.get_meter("social.archive.cleanup")
+    cleaned_gauge = meter.create_gauge(
+        "social.archive.cleanup.cleaned",
+        unit="1",
+        description="Number of items successfully cleaned from the source platform in this run",
+    )
+    failed_gauge = meter.create_gauge(
+        "social.archive.cleanup.failed",
+        unit="1",
+        description="Number of items that failed cleanup from the source platform in this run",
     )
 
     token = Variable.get("GITHUB_TOKEN")
@@ -464,21 +477,17 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
     with task_root_span(ti, task_provider, parent_context) as span:
         span.set_attribute("github.items_to_clean", len(github_items))
 
-        for item in github_items:
-            external_id = item["external_id"]
+        with otel_task_tracer.start_child_span(span_name="github.unstar batch") as batch_span:
+            batch_span.set_attribute("batch.size", len(github_items))
 
-            # title is stored as "owner/repo" (full_name)
-            row = hook.get_first(
-                "SELECT title FROM saved_items WHERE id = %s",
-                parameters=(item["id"],),
-            )
-            full_name = row[0] if row else None
-
-            with otel_task_tracer.start_child_span(
-                span_name=f"github.unstar.{external_id}"
-            ) as item_span:
-                item_span.set_attribute("item.external_id", external_id)
-                item_span.set_attribute("item.full_name", full_name or "")
+            for item in github_items:
+                external_id = item["external_id"]
+                # title is stored as "owner/repo" (full_name)
+                row = hook.get_first(
+                    "SELECT title FROM saved_items WHERE id = %s",
+                    parameters=(item["id"],),
+                )
+                full_name = row[0] if row else None
 
                 if not full_name or "/" not in full_name:
                     logger.warning(
@@ -495,7 +504,6 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
                         timeout=30,
                     )
                     if response.status_code in (204, 404):
-                        # 204 = successfully unstarred; 404 = repo gone, nothing to unstar
                         if response.status_code == 404:
                             logger.warning(
                                 f"GitHub repo {full_name} not found (deleted?); "
@@ -509,16 +517,23 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
 
                 except Exception as exc:
                     logger.error(f"Failed to unstar GitHub repo {full_name}: {exc}")
-                    item_span.set_attribute("error", str(exc))
+                    batch_span.add_event(
+                        "item.failed",
+                        {"item.external_id": external_id, "item.full_name": full_name or "", "error": str(exc)},
+                    )
                     failed_ids.append(external_id)
+
+            batch_span.set_attribute("batch.cleaned", len(cleaned_ids))
+            batch_span.set_attribute("batch.failed", len(failed_ids))
 
         span.set_attribute("github.items_cleaned", len(cleaned_ids))
         span.set_attribute("github.items_failed", len(failed_ids))
-        logger.info(
-            f"GitHub cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed"
-        )
+        logger.info(f"GitHub cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed")
 
+    cleaned_gauge.set(len(cleaned_ids), {"source": "github"})
+    failed_gauge.set(len(failed_ids), {"source": "github"})
     task_provider.force_flush()
+    meter_provider.force_flush()
     return cleaned_ids
 
 
@@ -536,7 +551,7 @@ def remove_cleaned_items(cleaned_id_lists: list[list[int]], ti) -> None:
         return
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider(ti.task_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
     # Multiple upstream tasks — fall back to Airflow carrier for context
     parent_context = resolve_parent_context(ti, otel_task_tracer)
 
