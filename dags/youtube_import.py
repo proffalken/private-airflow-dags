@@ -21,6 +21,7 @@ from airflow.traces.tracer import Trace
 from otel_utils import (
     create_task_provider,
     create_meter_provider,
+    instrument_llm,
     resolve_parent_context,
     task_root_span,
     parse_llm_json,
@@ -221,6 +222,7 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
     task_provider = create_task_provider("youtube-import", ti.run_id)
+    instrument_llm(task_provider)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_playlist_videos"
     )

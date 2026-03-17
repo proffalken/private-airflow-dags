@@ -6,4 +6,5 @@ RUN pip install --no-cache-dir \
     praw \
     anthropic \
     openai \
-    instagrapi
+    instagrapi \
+    opentelemetry-instrumentation-openai-v2

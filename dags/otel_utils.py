@@ -34,8 +34,9 @@ _log = logging.getLogger("airflow.otel_utils")
 # Logical grouping for all DAGs in this project
 _SERVICE_NAMESPACE = "social-archive"
 
-# Guard for idempotent requests instrumentation
+# Guards for idempotent instrumentation
 _requests_instrumented = False
+_llm_instrumented = False
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +114,27 @@ def create_meter_provider(service_name: str, dag_run_id: str) -> MeterProvider:
 # ---------------------------------------------------------------------------
 # Instrumentation helpers
 # ---------------------------------------------------------------------------
+
+def instrument_llm(task_provider: TracerProvider) -> None:
+    """Activate the official OTel GenAI instrumentation for the OpenAI SDK (idempotent).
+
+    Uses opentelemetry-instrumentation-openai-v2 from opentelemetry-python-contrib
+    (CNCF/OTel GenAI SIG). Works with Ollama because it exposes an OpenAI-compatible
+    API — the instrumentation wraps the SDK client, not the endpoint.
+
+    Produces spans with gen_ai.* semantic convention attributes:
+      gen_ai.system, gen_ai.request.model, gen_ai.usage.input_tokens,
+      gen_ai.usage.output_tokens, gen_ai.response.finish_reasons
+
+    Install: opentelemetry-instrumentation-openai-v2
+    """
+    global _llm_instrumented
+    if _llm_instrumented:
+        return
+    from opentelemetry.instrumentation.openai import OpenAIInstrumentor  # noqa: PLC0415
+    OpenAIInstrumentor().instrument(tracer_provider=task_provider)
+    _llm_instrumented = True
+
 
 def instrument_requests(task_provider: TracerProvider) -> None:
     """Activate opentelemetry-instrumentation-requests (idempotent).
