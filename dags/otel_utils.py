@@ -44,9 +44,10 @@ _llm_instrumented = False
 # ---------------------------------------------------------------------------
 
 def _otlp_base_url() -> str:
-    host = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_HOST"]
-    port = os.environ["AIRFLOW_OTEL_COLLECTOR_SERVICE_PORT_OTLP_HTTP"]
-    return f"http://{host}:{port}"
+    # Use the endpoint injected by the Dash0 operator (or any OTel-compliant
+    # collector that sets OTEL_EXPORTER_OTLP_ENDPOINT).  Strip trailing slash
+    # so callers can always safely append /v1/traces or /v1/metrics.
+    return os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"].rstrip("/")
 
 
 def _make_resource(service_name: str, dag_run_id: str) -> Resource:
