@@ -19,4 +19,5 @@ RUN pip install --no-cache-dir \
     "opentelemetry-exporter-otlp-proto-http>=1.40.0" \
     "opentelemetry-exporter-otlp-proto-grpc>=1.40.0" \
     "opentelemetry-semantic-conventions>=0.61b0" \
-    opentelemetry-instrumentation-openai-v2
+    opentelemetry-instrumentation-openai-v2 \
+    opentelemetry-instrumentation-requests
