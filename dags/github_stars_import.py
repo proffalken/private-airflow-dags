@@ -24,6 +24,7 @@ from otel_utils import (
     resolve_parent_context,
     task_root_span,
     parse_llm_json,
+    shutdown_providers,
 )
 
 logger = logging.getLogger("airflow.github_stars_dag")
@@ -145,8 +146,7 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
         logger.info(f"=== {new_count} new GitHub starred repos to process")
 
     repo_gauge.set(new_count)
-    task_provider.force_flush()
-    meter_provider.force_flush()
+    shutdown_providers(task_provider, meter_provider)
     return sorted_repos
 
 
@@ -300,7 +300,7 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                     span.set_attribute("items.inserted", inserted)
                     logger.info(f"=== Finished — {inserted} items stored")
 
-    task_provider.force_flush()
+    shutdown_providers(task_provider)
     logger.info("=" * 80)
 
 

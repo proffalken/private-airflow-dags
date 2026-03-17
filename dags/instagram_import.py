@@ -69,6 +69,7 @@ from otel_utils import (
     resolve_parent_context,
     task_root_span,
     parse_llm_json,
+    shutdown_providers,
 )
 
 logger = logging.getLogger("airflow.instagram_dag")
@@ -263,8 +264,7 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
 
     media_gauge.set(new_count)
 
-    task_provider.force_flush()
-    meter_provider.force_flush()
+    shutdown_providers(task_provider, meter_provider)
     return sorted_posts
 
 
@@ -431,7 +431,7 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                     span.set_attribute("items.inserted", inserted)
                     logger.info(f"=== Finished — {inserted} items stored")
 
-    task_provider.force_flush()
+    shutdown_providers(task_provider)
     logger.info("=" * 80)
 
 

@@ -25,18 +25,10 @@ from otel_utils import (
     task_root_span,
     get_trace_context,
     parse_llm_json,
+    shutdown_providers,
 )
 
 logger = logging.getLogger("airflow.reddit_dag")
-
-reddit = praw.Reddit(
-    client_id=Variable.get("REDDIT_CLIENT_ID"),
-    client_secret=Variable.get("REDDIT_CLIENT_SECRET"),
-    user_agent="proffalken-airflow",
-    username=Variable.get("REDDIT_USER"),
-    password=Variable.get("REDDIT_PASSWORD")
-)
-
 
 @task
 def get_saved_posts(ti):
@@ -47,6 +39,14 @@ def get_saved_posts(ti):
     task_provider = create_task_provider("reddit-import", ti.run_id)
     meter_provider = create_meter_provider("reddit-import", ti.run_id)
     parent_context = resolve_parent_context(ti, otel_task_tracer)
+
+    reddit = praw.Reddit(
+        client_id=Variable.get("REDDIT_CLIENT_ID"),
+        client_secret=Variable.get("REDDIT_CLIENT_SECRET"),
+        user_agent="proffalken-airflow",
+        username=Variable.get("REDDIT_USER"),
+        password=Variable.get("REDDIT_PASSWORD"),
+    )
 
     meter = meter_provider.get_meter("reddit.saved")
     post_gauge = meter.create_gauge(
@@ -114,8 +114,7 @@ def get_saved_posts(ti):
     post_gauge.set(post_count)
     comment_gauge.set(comment_count)
 
-    task_provider.force_flush()
-    meter_provider.force_flush()
+    shutdown_providers(task_provider, meter_provider)
     logger.info("Reddit saved post download finished.")
     return sorted_posts
 
@@ -225,7 +224,7 @@ def analyse_and_store(sorted_posts, ti):
                     span.set_attribute("items.inserted", inserted)
                     logger.info(f"=== Finished — {inserted} items stored")
 
-    task_provider.force_flush()
+    shutdown_providers(task_provider)
     logger.info("=" * 80)
 
 

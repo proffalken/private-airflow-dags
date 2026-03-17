@@ -25,6 +25,7 @@ from otel_utils import (
     resolve_parent_context,
     task_root_span,
     parse_llm_json,
+    shutdown_providers,
 )
 
 logger = logging.getLogger("airflow.youtube_dag")
@@ -198,8 +199,7 @@ def get_playlist_videos(ti) -> dict[str, list[dict]]:
         logger.info(f"=== {new_count} new YouTube videos to process")
 
     video_gauge.set(new_count)
-    task_provider.force_flush()
-    meter_provider.force_flush()
+    shutdown_providers(task_provider, meter_provider)
     return sorted_videos
 
 
@@ -352,7 +352,7 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                     span.set_attribute("items.inserted", inserted)
                     logger.info(f"=== Finished — {inserted} items stored")
 
-    task_provider.force_flush()
+    shutdown_providers(task_provider)
     logger.info("=" * 80)
 
 

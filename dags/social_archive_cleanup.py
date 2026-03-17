@@ -28,6 +28,7 @@ from otel_utils import (
     create_meter_provider,
     resolve_parent_context,
     task_root_span,
+    shutdown_providers,
 )
 
 logger = logging.getLogger("airflow.social_archive_cleanup")
@@ -82,8 +83,7 @@ def get_flagged_items(ti) -> list[dict]:
     for source, count in by_source.items():
         flagged_gauge.set(count, {"source": source})
 
-    task_provider.force_flush()
-    meter_provider.force_flush()
+    shutdown_providers(task_provider, meter_provider)
     return items
 
 
@@ -172,8 +172,7 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
 
     cleaned_gauge.set(len(cleaned_ids), {"source": "reddit"})
     failed_gauge.set(len(failed_ids), {"source": "reddit"})
-    task_provider.force_flush()
-    meter_provider.force_flush()
+    shutdown_providers(task_provider, meter_provider)
     return cleaned_ids
 
 
@@ -276,8 +275,7 @@ def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
 
     cleaned_gauge.set(len(cleaned_ids), {"source": "instagram"})
     failed_gauge.set(len(failed_ids), {"source": "instagram"})
-    task_provider.force_flush()
-    meter_provider.force_flush()
+    shutdown_providers(task_provider, meter_provider)
     return cleaned_ids
 
 
@@ -426,8 +424,7 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
 
     cleaned_gauge.set(len(cleaned_ids), {"source": "youtube"})
     failed_gauge.set(len(failed_ids), {"source": "youtube"})
-    task_provider.force_flush()
-    meter_provider.force_flush()
+    shutdown_providers(task_provider, meter_provider)
     return cleaned_ids
 
 
@@ -532,8 +529,7 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
 
     cleaned_gauge.set(len(cleaned_ids), {"source": "github"})
     failed_gauge.set(len(failed_ids), {"source": "github"})
-    task_provider.force_flush()
-    meter_provider.force_flush()
+    shutdown_providers(task_provider, meter_provider)
     return cleaned_ids
 
 
@@ -568,7 +564,7 @@ def remove_cleaned_items(cleaned_id_lists: list[list[int]], ti) -> None:
         span.set_attribute("items.deleted", len(all_ids))
         logger.info(f"Removed {len(all_ids)} items from archive database")
 
-    task_provider.force_flush()
+    shutdown_providers(task_provider)
 
 
 # ---------------------------------------------------------------------------

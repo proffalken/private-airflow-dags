@@ -10,13 +10,12 @@ Provides:
 """
 from __future__ import annotations
 
-import atexit
 import json
 import logging
 import os
 import re
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Iterator, Union
 
 from opentelemetry import trace
 from opentelemetry.propagate import inject, extract as otel_extract
@@ -50,11 +49,16 @@ def _otlp_base_url() -> str:
     return os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"].rstrip("/")
 
 
-def _make_resource(service_name: str, dag_run_id: str) -> Resource:
+def _make_resource(service_name: str) -> Resource:
     """Build a Resource with all recommended attributes.
 
-    service_name    — the DAG name, e.g. "reddit-import" (NOT the task_id)
-    dag_run_id      — ti.run_id, used as service.instance.id (unique per run)
+    service_name — the DAG name, e.g. "reddit-import" (NOT the task_id)
+
+    service.instance.id is set to the pod hostname (HOSTNAME env var), which
+    is stable for the lifetime of a pod and unique across pods.  It must NOT
+    be set to dag_run_id — that creates a new metric series per run, causing
+    unbounded cardinality in the backend.  Run-level correlation is handled
+    via the airflow.run_id span attribute, not via the resource.
     """
     return Resource.create({
         SERVICE_NAME: service_name,
@@ -63,8 +67,8 @@ def _make_resource(service_name: str, dag_run_id: str) -> Resource:
         "service.version": os.environ.get("DAG_VERSION", "unknown"),
         # Injected via Helm values (e.g. "production", "staging").
         "deployment.environment.name": os.environ.get("DEPLOYMENT_ENVIRONMENT", "production"),
-        # Unique per DAG run — allows instance-level analysis across parallel runs.
-        "service.instance.id": dag_run_id,
+        # Pod hostname — stable per pod, unique across pods.
+        "service.instance.id": os.environ.get("HOSTNAME", "unknown"),
     })
 
 
@@ -75,41 +79,60 @@ def _make_resource(service_name: str, dag_run_id: str) -> Resource:
 def create_task_provider(service_name: str, dag_run_id: str) -> TracerProvider:
     """Create a TracerProvider scoped to a single DAG task.
 
-    Registers an atexit handler so the final batch is always flushed, even
-    when a task exits via an exception before the explicit force_flush call.
+    Call shutdown_providers() at the end of every task (in a try/finally block
+    if possible) to flush and stop the background exporter thread.
 
     Args:
         service_name: The DAG name, NOT the task_id.  Use the DAG function
                       name as a stable, human-readable identifier, e.g.
                       "reddit-import".  This is what appears in service maps.
-        dag_run_id:   ti.run_id — unique per DAG run, used as service.instance.id.
+        dag_run_id:   ti.run_id — logged for debugging, not used in the resource.
     """
     endpoint = f"{_otlp_base_url()}/v1/traces"
-    _log.info("Creating tracer provider", extra={"service.name": service_name, "endpoint": endpoint})
-    provider = TracerProvider(resource=_make_resource(service_name, dag_run_id))
+    _log.info("Creating tracer provider", extra={"service.name": service_name, "dag_run_id": dag_run_id, "endpoint": endpoint})
+    provider = TracerProvider(resource=_make_resource(service_name))
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
-    atexit.register(provider.shutdown)
     return provider
 
 
 def create_meter_provider(service_name: str, dag_run_id: str) -> MeterProvider:
     """Create a MeterProvider scoped to a single DAG task.
 
-    Registers an atexit handler so any buffered metric data is always exported.
+    Call shutdown_providers() at the end of every task to flush buffered metric
+    data and stop the PeriodicExportingMetricReader background thread.
 
     Args:
         service_name: The DAG name (same value passed to create_task_provider).
-        dag_run_id:   ti.run_id.
+        dag_run_id:   ti.run_id — logged for debugging, not used in the resource.
     """
     endpoint = f"{_otlp_base_url()}/v1/metrics"
     exporter = OTLPMetricExporter(endpoint=endpoint)
     reader = PeriodicExportingMetricReader(exporter)
     provider = MeterProvider(
-        resource=_make_resource(service_name, dag_run_id),
+        resource=_make_resource(service_name),
         metric_readers=[reader],
     )
-    atexit.register(provider.shutdown)
     return provider
+
+
+def shutdown_providers(*providers: Union[TracerProvider, MeterProvider]) -> None:
+    """Flush and shut down one or more OTEL providers.
+
+    Call this at the end of every task function (ideally in a try/finally block)
+    to ensure all buffered spans/metrics are exported and the background threads
+    are stopped.  This replaces the previous atexit-based approach, which
+    accumulated live provider references and background threads across multiple
+    task executions in the same long-running Celery worker process.
+    """
+    for provider in providers:
+        try:
+            provider.force_flush()
+        except Exception:
+            _log.exception("Error flushing provider %r", provider)
+        try:
+            provider.shutdown()
+        except Exception:
+            _log.exception("Error shutting down provider %r", provider)
 
 
 # ---------------------------------------------------------------------------
