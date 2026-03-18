@@ -87,8 +87,8 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
     logger.info(f"Getting GitHub starred repos — DAG: {ti.dag_id}, Run: {ti.run_id}")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("github-stars-import", ti.run_id)
-    meter_provider = create_meter_provider("github-stars-import", ti.run_id)
+    task_provider = create_task_provider("github-stars-import", ti.run_id, ti.task_id)
+    meter_provider = create_meter_provider("github-stars-import", ti.run_id, ti.task_id)
     parent_context = resolve_parent_context(ti, otel_task_tracer)
 
     meter = meter_provider.get_meter("github.stars")
@@ -168,7 +168,7 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
         raise AirflowSkipException("No new GitHub starred repos to analyse")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("github-stars-import", ti.run_id)
+    task_provider = create_task_provider("github-stars-import", ti.run_id, ti.task_id)
     instrument_llm(task_provider)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_starred_repos"

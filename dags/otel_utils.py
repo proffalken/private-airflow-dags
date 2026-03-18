@@ -76,26 +76,29 @@ def _make_resource(service_name: str) -> Resource:
 # Provider factories
 # ---------------------------------------------------------------------------
 
-def create_task_provider(service_name: str, dag_run_id: str) -> TracerProvider:
+def create_task_provider(service_name: str, dag_run_id: str, task_id: str = "") -> TracerProvider:
     """Create a TracerProvider scoped to a single DAG task.
 
     Call shutdown_providers() at the end of every task (in a try/finally block
     if possible) to flush and stop the background exporter thread.
 
     Args:
-        service_name: The DAG name, NOT the task_id.  Use the DAG function
-                      name as a stable, human-readable identifier, e.g.
-                      "reddit-import".  This is what appears in service maps.
+        service_name: The DAG name, e.g. "reddit-import".
         dag_run_id:   ti.run_id — logged for debugging, not used in the resource.
+        task_id:      ti.task_id — appended to service_name to give each task a
+                      distinct service.name (e.g. "reddit-import.get_saved_posts").
+                      This produces a separate node per task in Dash0's service map
+                      and trace graph with bounded cardinality (stable task names).
     """
+    effective_service = f"{service_name}.{task_id}" if task_id else service_name
     endpoint = f"{_otlp_base_url()}/v1/traces"
-    _log.info("Creating tracer provider", extra={"service.name": service_name, "dag_run_id": dag_run_id, "endpoint": endpoint})
-    provider = TracerProvider(resource=_make_resource(service_name))
+    _log.info("Creating tracer provider", extra={"service.name": effective_service, "dag_run_id": dag_run_id, "endpoint": endpoint})
+    provider = TracerProvider(resource=_make_resource(effective_service))
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
     return provider
 
 
-def create_meter_provider(service_name: str, dag_run_id: str) -> MeterProvider:
+def create_meter_provider(service_name: str, dag_run_id: str, task_id: str = "") -> MeterProvider:
     """Create a MeterProvider scoped to a single DAG task.
 
     Call shutdown_providers() at the end of every task to flush buffered metric
@@ -104,12 +107,14 @@ def create_meter_provider(service_name: str, dag_run_id: str) -> MeterProvider:
     Args:
         service_name: The DAG name (same value passed to create_task_provider).
         dag_run_id:   ti.run_id — logged for debugging, not used in the resource.
+        task_id:      ti.task_id — see create_task_provider for rationale.
     """
+    effective_service = f"{service_name}.{task_id}" if task_id else service_name
     endpoint = f"{_otlp_base_url()}/v1/metrics"
     exporter = OTLPMetricExporter(endpoint=endpoint)
     reader = PeriodicExportingMetricReader(exporter)
     provider = MeterProvider(
-        resource=_make_resource(service_name),
+        resource=_make_resource(effective_service),
         metric_readers=[reader],
     )
     return provider

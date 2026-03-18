@@ -36,8 +36,8 @@ def get_saved_posts(ti):
     logger.info(f"Getting saved posts - DAG: {ti.dag_id}, Run: {ti.run_id}")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("reddit-import", ti.run_id)
-    meter_provider = create_meter_provider("reddit-import", ti.run_id)
+    task_provider = create_task_provider("reddit-import", ti.run_id, ti.task_id)
+    meter_provider = create_meter_provider("reddit-import", ti.run_id, ti.task_id)
     parent_context = resolve_parent_context(ti, otel_task_tracer)
 
     reddit = praw.Reddit(
@@ -130,7 +130,7 @@ def analyse_and_store(sorted_posts, ti):
         raise AirflowSkipException("No new items to analyse")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("reddit-import", ti.run_id)
+    task_provider = create_task_provider("reddit-import", ti.run_id, ti.task_id)
     instrument_requests(task_provider)
     instrument_llm(task_provider)
     parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="get_saved_posts")

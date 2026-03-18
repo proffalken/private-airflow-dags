@@ -52,8 +52,8 @@ def _get_reddit_client():
 def get_flagged_items(ti) -> list[dict]:
     """Fetch all items flagged for deletion from the archive database."""
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
     parent_context = resolve_parent_context(ti, otel_task_tracer)
 
     meter = meter_provider.get_meter("social.archive.cleanup")
@@ -105,8 +105,8 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_flagged_items"
     )
@@ -214,8 +214,8 @@ def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_flagged_items"
     )
@@ -313,8 +313,8 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_flagged_items"
     )
@@ -443,8 +443,8 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
+    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
     parent_context = resolve_parent_context(
         ti, otel_task_tracer, previous_task_id="get_flagged_items"
     )
@@ -547,7 +547,7 @@ def remove_cleaned_items(cleaned_id_lists: list[list[int]], ti) -> None:
         return
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id)
+    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
     # Multiple upstream tasks — fall back to Airflow carrier for context
     parent_context = resolve_parent_context(ti, otel_task_tracer)
 
