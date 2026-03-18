@@ -316,7 +316,7 @@ def task_root_span(
 
         with tracer.start_as_current_span(
             f"publish {ti.dag_id}",
-            kind=SpanKind.PRODUCER,
+            kind=SpanKind.CLIENT,
         ) as producer_span:
             producer_span.set_attribute("messaging.system", "airflow")
             producer_span.set_attribute("messaging.destination.name", ti.dag_id)
