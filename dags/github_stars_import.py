@@ -113,7 +113,7 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
     sorted_repos: dict[str, list[dict]] = {}
     new_count = 0
 
-    with task_root_span(ti, task_provider, parent_context) as span:
+    with task_root_span(ti, task_provider, parent_context, next_task_id="analyse_and_store") as span:
         with otel_task_tracer.start_child_span(span_name="fetch_starred_repos"):
             all_repos = _fetch_all_starred_repos(token)
             logger.info(f"Total starred repos: {len(all_repos)}")

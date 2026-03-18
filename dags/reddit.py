@@ -74,7 +74,7 @@ def get_saved_posts(ti):
     post_count = 0
     comment_count = 0
 
-    with task_root_span(ti, task_provider, parent_context) as span:
+    with task_root_span(ti, task_provider, parent_context, next_task_id="analyse_and_store") as span:
         instrument_requests(task_provider)
 
         with otel_task_tracer.start_child_span(span_name="fetch_saved_items"):

@@ -127,7 +127,7 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
     failed_ids: list[str] = []
     reddit = _get_reddit_client()
 
-    with task_root_span(ti, task_provider, parent_context) as span:
+    with task_root_span(ti, task_provider, parent_context, next_task_id="remove_cleaned_items") as span:
         span.set_attribute("reddit.items_to_clean", len(reddit_items))
 
         with otel_task_tracer.start_child_span(span_name="reddit.unsave batch") as batch_span:
@@ -236,7 +236,7 @@ def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
     cleaned_ids: list[int] = []
     failed_ids: list[str] = []
 
-    with task_root_span(ti, task_provider, parent_context) as span:
+    with task_root_span(ti, task_provider, parent_context, next_task_id="remove_cleaned_items") as span:
         span.set_attribute("instagram.items_to_clean", len(instagram_items))
 
         with otel_task_tracer.start_child_span(span_name="instagram.unsave batch") as batch_span:
@@ -349,7 +349,7 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
 
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
-    with task_root_span(ti, task_provider, parent_context) as span:
+    with task_root_span(ti, task_provider, parent_context, next_task_id="remove_cleaned_items") as span:
         span.set_attribute("youtube.items_to_clean", len(youtube_items))
 
         with otel_task_tracer.start_child_span(span_name="youtube.remove batch") as batch_span:
@@ -471,7 +471,7 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
     cleaned_ids: list[int] = []
     failed_ids: list[str] = []
 
-    with task_root_span(ti, task_provider, parent_context) as span:
+    with task_root_span(ti, task_provider, parent_context, next_task_id="remove_cleaned_items") as span:
         span.set_attribute("github.items_to_clean", len(github_items))
 
         with otel_task_tracer.start_child_span(span_name="github.unstar batch") as batch_span:

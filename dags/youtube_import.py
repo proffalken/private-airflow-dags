@@ -135,7 +135,7 @@ def get_playlist_videos(ti) -> dict[str, list[dict]]:
     sorted_videos: dict[str, list[dict]] = {}
     new_count = 0
 
-    with task_root_span(ti, task_provider, parent_context) as span:
+    with task_root_span(ti, task_provider, parent_context, next_task_id="analyse_and_store") as span:
         with otel_task_tracer.start_child_span(span_name="fetch_playlists"):
             playlists = []
             request = youtube.playlists().list(

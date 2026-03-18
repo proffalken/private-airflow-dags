@@ -46,7 +46,12 @@ def _otlp_base_url() -> str:
     # Use the endpoint injected by the Dash0 operator (or any OTel-compliant
     # collector that sets OTEL_EXPORTER_OTLP_ENDPOINT).  Strip trailing slash
     # so callers can always safely append /v1/traces or /v1/metrics.
-    return os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"].rstrip("/")
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").rstrip("/")
+    if not endpoint:
+        _log.warning(
+            "OTEL_EXPORTER_OTLP_ENDPOINT is not set — telemetry export will be skipped"
+        )
+    return endpoint
 
 
 def _make_resource(service_name: str) -> Resource:
@@ -91,10 +96,12 @@ def create_task_provider(service_name: str, dag_run_id: str, task_id: str = "") 
                       and trace graph with bounded cardinality (stable task names).
     """
     effective_service = f"{service_name}.{task_id}" if task_id else service_name
-    endpoint = f"{_otlp_base_url()}/v1/traces"
-    _log.info("Creating tracer provider", extra={"service.name": effective_service, "dag_run_id": dag_run_id, "endpoint": endpoint})
     provider = TracerProvider(resource=_make_resource(effective_service))
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+    base = _otlp_base_url()
+    if base:
+        endpoint = f"{base}/v1/traces"
+        _log.info("[OTLPSpanExporter] Connecting to OpenTelemetry Collector at %s", endpoint)
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
     return provider
 
 
@@ -110,9 +117,15 @@ def create_meter_provider(service_name: str, dag_run_id: str, task_id: str = "")
         task_id:      ti.task_id — see create_task_provider for rationale.
     """
     effective_service = f"{service_name}.{task_id}" if task_id else service_name
-    endpoint = f"{_otlp_base_url()}/v1/metrics"
-    exporter = OTLPMetricExporter(endpoint=endpoint)
-    reader = PeriodicExportingMetricReader(exporter)
+    base = _otlp_base_url()
+    if base:
+        endpoint = f"{base}/v1/metrics"
+        _log.info("[OTLPMetricExporter] Connecting to OpenTelemetry Collector at %s", endpoint)
+        exporter = OTLPMetricExporter(endpoint=endpoint)
+        reader = PeriodicExportingMetricReader(exporter)
+    else:
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader  # noqa: PLC0415
+        reader = InMemoryMetricReader()
     provider = MeterProvider(
         resource=_make_resource(effective_service),
         metric_readers=[reader],
@@ -240,15 +253,38 @@ def get_trace_context() -> dict:
 # ---------------------------------------------------------------------------
 
 @contextmanager
-def task_root_span(ti, task_provider: TracerProvider, parent_context) -> Iterator:
+def task_root_span(
+    ti,
+    task_provider: TracerProvider,
+    parent_context,
+    next_task_id: str | None = None,
+) -> Iterator:
     """Create the root CONSUMER span for a DAG task.
 
     On entry: starts a CONSUMER span named dag.<dag_id>.task.<task_id> with
-              standard airflow.* attributes.
-    On exit:  creates a PRODUCER child span ("trigger next task") and pushes the
-              W3C trace context to XCom so the next task can continue the trace.
+              standard airflow.* and messaging.* attributes.
+    On exit:  creates a PRODUCER child span and pushes the W3C trace context to
+              XCom so the next task can continue the trace.
+
+    Args:
+        ti:             Airflow TaskInstance.
+        task_provider:  TracerProvider created by create_task_provider().
+        parent_context: Context returned by resolve_parent_context().
+        next_task_id:   task_id of the immediately downstream task, if any.
+                        Used to set peer.service on the PRODUCER span so Dash0
+                        can draw the service map edge to the next task's service.
+                        Omit for terminal tasks or fan-out steps.
     """
     tracer = trace.get_tracer(ti.task_id, tracer_provider=task_provider)
+
+    # Derive the next task's service name from this provider's resource.
+    # Resource service.name follows the pattern "{dag-name}.{task_id}".
+    _next_service: str | None = None
+    if next_task_id:
+        this_service = task_provider.resource.attributes.get(SERVICE_NAME, "")
+        if "." in this_service:
+            base = this_service.rsplit(".", 1)[0]
+            _next_service = f"{base}.{next_task_id}"
 
     with tracer.start_as_current_span(
         f"dag.{ti.dag_id}.task.{ti.task_id}",
@@ -258,6 +294,11 @@ def task_root_span(ti, task_provider: TracerProvider, parent_context) -> Iterato
         span.set_attribute("airflow.dag_id", ti.dag_id)
         span.set_attribute("airflow.task_id", ti.task_id)
         span.set_attribute("airflow.run_id", ti.run_id)
+        # messaging.* attributes tell Dash0 this is a messaging span and enable
+        # service map edge detection between tasks.
+        span.set_attribute("messaging.system", "airflow")
+        span.set_attribute("messaging.destination.name", f"{ti.dag_id}.{ti.task_id}")
+        span.set_attribute("messaging.operation.type", "process")
 
         ctx = span.get_span_context()
         if ctx.trace_id == 0:
@@ -273,7 +314,15 @@ def task_root_span(ti, task_provider: TracerProvider, parent_context) -> Iterato
 
         yield span
 
-        with tracer.start_as_current_span("trigger next task", kind=SpanKind.PRODUCER):
+        with tracer.start_as_current_span(
+            f"publish {ti.dag_id}",
+            kind=SpanKind.PRODUCER,
+        ) as producer_span:
+            producer_span.set_attribute("messaging.system", "airflow")
+            producer_span.set_attribute("messaging.destination.name", ti.dag_id)
+            producer_span.set_attribute("messaging.operation.type", "publish")
+            if _next_service:
+                producer_span.set_attribute("peer.service", _next_service)
             carrier: dict = {}
             inject(carrier)
             ti.xcom_push(key="otel_context", value=carrier)
