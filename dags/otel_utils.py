@@ -3,7 +3,7 @@
 Provides:
 - create_task_provider / create_meter_provider with correct resource attributes
 - resolve_parent_context for W3C trace propagation across tasks
-- task_root_span context manager (CONSUMER root + PRODUCER handoff)
+- task_root_span context manager (SERVER root + CLIENT handoff)
 - instrument_requests (idempotent, fixes the _REQUESTS_INSTRUMENTED=True bug)
 - get_trace_context for structured log correlation
 - _parse_llm_json for robust LLM response parsing
@@ -30,9 +30,6 @@ from opentelemetry.trace import SpanKind
 
 _log = logging.getLogger("airflow.otel_utils")
 
-# Logical grouping for all DAGs in this project
-_SERVICE_NAMESPACE = "social-archive"
-
 # Guards for idempotent instrumentation
 _requests_instrumented = False
 _llm_instrumented = False
@@ -54,10 +51,14 @@ def _otlp_base_url() -> str:
     return endpoint
 
 
-def _make_resource(service_name: str) -> Resource:
+def _make_resource(service_name: str, namespace: str) -> Resource:
     """Build a Resource with all recommended attributes.
 
-    service_name — the DAG name, e.g. "reddit-import" (NOT the task_id)
+    service_name — the task name, e.g. "get_saved_posts"
+    namespace    — the DAG name, e.g. "reddit-import"
+
+    Each task appears as its own service node in the service map, grouped
+    under the DAG name as service.namespace.
 
     service.instance.id is set to the pod hostname (HOSTNAME env var), which
     is stable for the lifetime of a pod and unique across pods.  It must NOT
@@ -67,7 +68,7 @@ def _make_resource(service_name: str) -> Resource:
     """
     return Resource.create({
         SERVICE_NAME: service_name,
-        "service.namespace": _SERVICE_NAMESPACE,
+        "service.namespace": namespace,
         # Injected at image build time; falls back to "unknown" in local dev.
         "service.version": os.environ.get("DAG_VERSION", "unknown"),
         # Injected via Helm values (e.g. "production", "staging").
@@ -81,22 +82,21 @@ def _make_resource(service_name: str) -> Resource:
 # Provider factories
 # ---------------------------------------------------------------------------
 
-def create_task_provider(service_name: str, dag_run_id: str, task_id: str = "") -> TracerProvider:
+def create_task_provider(dag_name: str, dag_run_id: str, task_id: str = "") -> TracerProvider:
     """Create a TracerProvider scoped to a single DAG task.
 
     Call shutdown_providers() at the end of every task (in a try/finally block
     if possible) to flush and stop the background exporter thread.
 
     Args:
-        service_name: The DAG name, e.g. "reddit-import".
-        dag_run_id:   ti.run_id — logged for debugging, not used in the resource.
-        task_id:      ti.task_id — appended to service_name to give each task a
-                      distinct service.name (e.g. "reddit-import.get_saved_posts").
-                      This produces a separate node per task in Dash0's service map
-                      and trace graph with bounded cardinality (stable task names).
+        dag_name:   The DAG name, e.g. "reddit-import" — used as service.namespace.
+        dag_run_id: ti.run_id — logged for debugging, not used in the resource.
+        task_id:    ti.task_id — used as service.name (e.g. "get_saved_posts").
+                    Each task appears as a distinct service node in the service map,
+                    grouped under dag_name as the namespace.
     """
-    effective_service = f"{service_name}.{task_id}" if task_id else service_name
-    provider = TracerProvider(resource=_make_resource(effective_service))
+    service_name = task_id if task_id else dag_name
+    provider = TracerProvider(resource=_make_resource(service_name, dag_name))
     base = _otlp_base_url()
     if base:
         endpoint = f"{base}/v1/traces"
@@ -105,18 +105,18 @@ def create_task_provider(service_name: str, dag_run_id: str, task_id: str = "") 
     return provider
 
 
-def create_meter_provider(service_name: str, dag_run_id: str, task_id: str = "") -> MeterProvider:
+def create_meter_provider(dag_name: str, dag_run_id: str, task_id: str = "") -> MeterProvider:
     """Create a MeterProvider scoped to a single DAG task.
 
     Call shutdown_providers() at the end of every task to flush buffered metric
     data and stop the PeriodicExportingMetricReader background thread.
 
     Args:
-        service_name: The DAG name (same value passed to create_task_provider).
-        dag_run_id:   ti.run_id — logged for debugging, not used in the resource.
-        task_id:      ti.task_id — see create_task_provider for rationale.
+        dag_name:   The DAG name — used as service.namespace (same as create_task_provider).
+        dag_run_id: ti.run_id — logged for debugging, not used in the resource.
+        task_id:    ti.task_id — used as service.name (see create_task_provider).
     """
-    effective_service = f"{service_name}.{task_id}" if task_id else service_name
+    service_name = task_id if task_id else dag_name
     base = _otlp_base_url()
     if base:
         endpoint = f"{base}/v1/metrics"
@@ -127,7 +127,7 @@ def create_meter_provider(service_name: str, dag_run_id: str, task_id: str = "")
         from opentelemetry.sdk.metrics.export import InMemoryMetricReader  # noqa: PLC0415
         reader = InMemoryMetricReader()
     provider = MeterProvider(
-        resource=_make_resource(effective_service),
+        resource=_make_resource(service_name, dag_name),
         metric_readers=[reader],
     )
     return provider
@@ -259,11 +259,11 @@ def task_root_span(
     parent_context,
     next_task_id: str | None = None,
 ) -> Iterator:
-    """Create the root CONSUMER span for a DAG task.
+    """Create the root SERVER span for a DAG task.
 
-    On entry: starts a CONSUMER span named dag.<dag_id>.task.<task_id> with
-              standard airflow.* and messaging.* attributes.
-    On exit:  creates a PRODUCER child span and pushes the W3C trace context to
+    On entry: starts a SERVER span named dag.<dag_id>.task.<task_id> with
+              standard airflow.* attributes.
+    On exit:  creates a CLIENT child span and pushes the W3C trace context to
               XCom so the next task can continue the trace.
 
     Args:
@@ -271,34 +271,20 @@ def task_root_span(
         task_provider:  TracerProvider created by create_task_provider().
         parent_context: Context returned by resolve_parent_context().
         next_task_id:   task_id of the immediately downstream task, if any.
-                        Used to set peer.service on the PRODUCER span so Dash0
-                        can draw the service map edge to the next task's service.
+                        Used to set peer.service on the CLIENT handoff span so
+                        Dash0 can draw the service map edge to the next task.
                         Omit for terminal tasks or fan-out steps.
     """
     tracer = trace.get_tracer(ti.task_id, tracer_provider=task_provider)
 
-    # Derive the next task's service name from this provider's resource.
-    # Resource service.name follows the pattern "{dag-name}.{task_id}".
-    _next_service: str | None = None
-    if next_task_id:
-        this_service = task_provider.resource.attributes.get(SERVICE_NAME, "")
-        if "." in this_service:
-            base = this_service.rsplit(".", 1)[0]
-            _next_service = f"{base}.{next_task_id}"
-
     with tracer.start_as_current_span(
         f"dag.{ti.dag_id}.task.{ti.task_id}",
         context=parent_context,
-        kind=SpanKind.CONSUMER,
+        kind=SpanKind.SERVER,
     ) as span:
         span.set_attribute("airflow.dag_id", ti.dag_id)
         span.set_attribute("airflow.task_id", ti.task_id)
         span.set_attribute("airflow.run_id", ti.run_id)
-        # messaging.* attributes tell Dash0 this is a messaging span and enable
-        # service map edge detection between tasks.
-        span.set_attribute("messaging.system", "airflow")
-        span.set_attribute("messaging.destination.name", f"{ti.dag_id}.{ti.task_id}")
-        span.set_attribute("messaging.operation.type", "process")
 
         ctx = span.get_span_context()
         if ctx.trace_id == 0:
@@ -315,14 +301,13 @@ def task_root_span(
         yield span
 
         with tracer.start_as_current_span(
-            f"publish {ti.dag_id}",
+            f"handoff {ti.dag_id}.{ti.task_id} -> {next_task_id}" if next_task_id else f"handoff {ti.dag_id}.{ti.task_id}",
             kind=SpanKind.CLIENT,
-        ) as producer_span:
-            producer_span.set_attribute("messaging.system", "airflow")
-            producer_span.set_attribute("messaging.destination.name", ti.dag_id)
-            producer_span.set_attribute("messaging.operation.type", "publish")
-            if _next_service:
-                producer_span.set_attribute("peer.service", _next_service)
+        ) as handoff_span:
+            handoff_span.set_attribute("airflow.dag_id", ti.dag_id)
+            handoff_span.set_attribute("airflow.task_id", ti.task_id)
+            if next_task_id:
+                handoff_span.set_attribute("peer.service", next_task_id)
             carrier: dict = {}
             inject(carrier)
             ti.xcom_push(key="otel_context", value=carrier)
