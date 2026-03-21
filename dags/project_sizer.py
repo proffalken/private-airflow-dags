@@ -70,10 +70,28 @@ def project_sizer():
 
     @task
     def warm_up_model():
-        """Ping Ollama until the model is loaded and responding. Blocks until ready."""
+        """Pull the model if needed, then wait until Ollama is responding."""
         import time
+        import requests
+
+        ollama_base = "http://ollama.ollama.svc.cluster.local:11434"
+
+        # Pull the model (no-op if already present; streams status lines until done)
+        logger.info("Pulling model %s (no-op if already present)...", OLLAMA_MODEL)
+        with requests.post(
+            f"{ollama_base}/api/pull",
+            json={"model": OLLAMA_MODEL},
+            stream=True,
+            timeout=600,
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if line:
+                    logger.info("pull: %s", line.decode())
+
+        logger.info("Pull complete. Waiting for model to respond to inference...")
         client = get_llm_client()
-        for attempt in range(20):
+        for attempt in range(24):  # up to 2 minutes
             try:
                 response = client.chat.completions.create(
                     model=OLLAMA_MODEL,
@@ -84,9 +102,9 @@ def project_sizer():
                     logger.info("Model ready after %d attempt(s)", attempt + 1)
                     return
             except Exception as exc:
-                logger.info("Warm-up attempt %d failed: %s", attempt + 1, exc)
+                logger.info("Warm-up attempt %d: %s", attempt + 1, exc)
             time.sleep(5)
-        raise RuntimeError(f"Model {OLLAMA_MODEL} did not become ready after 100s")
+        raise RuntimeError(f"Model {OLLAMA_MODEL} did not respond after pull")
 
     @task
     def fetch_unestimated(ti):
