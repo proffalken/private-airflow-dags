@@ -69,6 +69,26 @@ URL: {uri}
 def project_sizer():
 
     @task
+    def warm_up_model():
+        """Ping Ollama until the model is loaded and responding. Blocks until ready."""
+        import time
+        client = get_llm_client()
+        for attempt in range(20):
+            try:
+                response = client.chat.completions.create(
+                    model=OLLAMA_MODEL,
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+                if response.choices and response.choices[0].message.content:
+                    logger.info("Model ready after %d attempt(s)", attempt + 1)
+                    return
+            except Exception as exc:
+                logger.info("Warm-up attempt %d failed: %s", attempt + 1, exc)
+            time.sleep(5)
+        raise RuntimeError(f"Model {OLLAMA_MODEL} did not become ready after 100s")
+
+    @task
     def fetch_unestimated(ti):
         hook = PostgresHook(postgres_conn_id="social_archive_db")
         with hook.get_conn() as conn:
@@ -188,7 +208,9 @@ def project_sizer():
         logger.info("Sizing complete: %d estimated, %d skipped", len(results), len(items) - len(results))
         return results
 
+    ready = warm_up_model()
     items = fetch_unestimated()
+    ready >> items
     estimate_items(items)
 
 
