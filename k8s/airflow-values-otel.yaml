@@ -1,0 +1,23 @@
+# Helm values override for the Airflow release.
+# Ensures OTEL_EXPORTER_OTLP_ENDPOINT is propagated to task worker subprocesses,
+# which run in a separate PID from the main Airflow worker and do not automatically
+# inherit all environment variables.
+#
+# Apply with:
+#   helm upgrade airflow apache-airflow/airflow \
+#     -n airflow --version 1.19.0 --reuse-values \
+#     -f k8s/airflow-values-otel.yaml
+
+env:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"
+
+workers:
+  env:
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"
+
+triggerer:
+  env:
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"

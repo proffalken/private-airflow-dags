@@ -161,12 +161,15 @@ def shutdown_otel() -> None:
     """Flush and shut down all providers. Called automatically by the decorator."""
     global _tracer_provider, _meter_provider, _logger_provider
     if _tracer_provider:
+        _tracer_provider.force_flush(timeout_millis=30_000)
         _tracer_provider.shutdown()
         _tracer_provider = None
     if _meter_provider:
+        _meter_provider.force_flush(timeout_millis=30_000)
         _meter_provider.shutdown()
         _meter_provider = None
     if _logger_provider:
+        _logger_provider.force_flush(timeout_millis=30_000)
         _logger_provider.shutdown()
         _logger_provider = None
 
