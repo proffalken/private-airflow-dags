@@ -23,13 +23,7 @@ from airflow.sdk import dag, task, Variable
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
-from otel_utils import (
-    create_task_provider,
-    create_meter_provider,
-    resolve_parent_context,
-    task_root_span,
-    shutdown_providers,
-)
+from airflow_otel import instrument_task_context, get_meter
 
 logger = logging.getLogger("airflow.social_archive_cleanup")
 
@@ -52,18 +46,14 @@ def _get_reddit_client():
 def get_flagged_items(ti) -> list[dict]:
     """Fetch all items flagged for deletion from the archive database."""
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    parent_context = resolve_parent_context(ti, otel_task_tracer)
 
-    meter = meter_provider.get_meter("social.archive.cleanup")
-    flagged_gauge = meter.create_gauge(
-        "social.archive.cleanup.flagged",
-        unit="1",
-        description="Number of items flagged for deletion at the start of this cleanup run",
-    )
-
-    with task_root_span(ti, task_provider, parent_context) as span:
+    with instrument_task_context({}) as span:
+        meter = get_meter("social.archive.cleanup")
+        flagged_gauge = meter.create_gauge(
+            "social.archive.cleanup.flagged",
+            unit="1",
+            description="Number of items flagged for deletion at the start of this cleanup run",
+        )
         hook = PostgresHook(postgres_conn_id="social_archive_db")
         rows = hook.get_records(
             "SELECT id, source, external_id, type "
@@ -80,10 +70,9 @@ def get_flagged_items(ti) -> list[dict]:
         span.set_attribute("flagged.total", len(items))
         logger.info(f"Found {len(items)} items flagged for deletion: {by_source}")
 
-    for source, count in by_source.items():
-        flagged_gauge.set(count, {"source": source})
+        for source, count in by_source.items():
+            flagged_gauge.set(count, {"source": source})
 
-    shutdown_providers(task_provider, meter_provider)
     return items
 
 
@@ -105,29 +94,22 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    parent_context = resolve_parent_context(
-        ti, otel_task_tracer, previous_task_id="get_flagged_items"
-    )
-
-    meter = meter_provider.get_meter("social.archive.cleanup")
-    cleaned_gauge = meter.create_gauge(
-        "social.archive.cleanup.cleaned",
-        unit="1",
-        description="Number of items successfully cleaned from the source platform in this run",
-    )
-    failed_gauge = meter.create_gauge(
-        "social.archive.cleanup.failed",
-        unit="1",
-        description="Number of items that failed cleanup from the source platform in this run",
-    )
-
     cleaned_ids: list[int] = []
     failed_ids: list[str] = []
     reddit = _get_reddit_client()
 
-    with task_root_span(ti, task_provider, parent_context, next_task_id="remove_cleaned_items") as span:
+    with instrument_task_context({}) as span:
+        meter = get_meter("social.archive.cleanup")
+        cleaned_gauge = meter.create_gauge(
+            "social.archive.cleanup.cleaned",
+            unit="1",
+            description="Number of items successfully cleaned from the source platform in this run",
+        )
+        failed_gauge = meter.create_gauge(
+            "social.archive.cleanup.failed",
+            unit="1",
+            description="Number of items that failed cleanup from the source platform in this run",
+        )
         span.set_attribute("reddit.items_to_clean", len(reddit_items))
 
         with otel_task_tracer.start_child_span(span_name="reddit.unsave batch") as batch_span:
@@ -169,10 +151,9 @@ def cleanup_reddit(flagged_items: list[dict], ti) -> list[int]:
         span.set_attribute("reddit.items_cleaned", len(cleaned_ids))
         span.set_attribute("reddit.items_failed", len(failed_ids))
         logger.info(f"Reddit cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed")
+        cleaned_gauge.set(len(cleaned_ids), {"source": "reddit"})
+        failed_gauge.set(len(failed_ids), {"source": "reddit"})
 
-    cleaned_gauge.set(len(cleaned_ids), {"source": "reddit"})
-    failed_gauge.set(len(failed_ids), {"source": "reddit"})
-    shutdown_providers(task_provider, meter_provider)
     return cleaned_ids
 
 
@@ -214,29 +195,22 @@ def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    parent_context = resolve_parent_context(
-        ti, otel_task_tracer, previous_task_id="get_flagged_items"
-    )
-
-    meter = meter_provider.get_meter("social.archive.cleanup")
-    cleaned_gauge = meter.create_gauge(
-        "social.archive.cleanup.cleaned",
-        unit="1",
-        description="Number of items successfully cleaned from the source platform in this run",
-    )
-    failed_gauge = meter.create_gauge(
-        "social.archive.cleanup.failed",
-        unit="1",
-        description="Number of items that failed cleanup from the source platform in this run",
-    )
-
     cl = _get_instagram_client()
     cleaned_ids: list[int] = []
     failed_ids: list[str] = []
 
-    with task_root_span(ti, task_provider, parent_context, next_task_id="remove_cleaned_items") as span:
+    with instrument_task_context({}) as span:
+        meter = get_meter("social.archive.cleanup")
+        cleaned_gauge = meter.create_gauge(
+            "social.archive.cleanup.cleaned",
+            unit="1",
+            description="Number of items successfully cleaned from the source platform in this run",
+        )
+        failed_gauge = meter.create_gauge(
+            "social.archive.cleanup.failed",
+            unit="1",
+            description="Number of items that failed cleanup from the source platform in this run",
+        )
         span.set_attribute("instagram.items_to_clean", len(instagram_items))
 
         with otel_task_tracer.start_child_span(span_name="instagram.unsave batch") as batch_span:
@@ -272,10 +246,9 @@ def cleanup_instagram(flagged_items: list[dict], ti) -> list[int]:
         span.set_attribute("instagram.items_cleaned", len(cleaned_ids))
         span.set_attribute("instagram.items_failed", len(failed_ids))
         logger.info(f"Instagram cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed")
+        cleaned_gauge.set(len(cleaned_ids), {"source": "instagram"})
+        failed_gauge.set(len(failed_ids), {"source": "instagram"})
 
-    cleaned_gauge.set(len(cleaned_ids), {"source": "instagram"})
-    failed_gauge.set(len(failed_ids), {"source": "instagram"})
-    shutdown_providers(task_provider, meter_provider)
     return cleaned_ids
 
 
@@ -313,24 +286,6 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    parent_context = resolve_parent_context(
-        ti, otel_task_tracer, previous_task_id="get_flagged_items"
-    )
-
-    meter = meter_provider.get_meter("social.archive.cleanup")
-    cleaned_gauge = meter.create_gauge(
-        "social.archive.cleanup.cleaned",
-        unit="1",
-        description="Number of items successfully cleaned from the source platform in this run",
-    )
-    failed_gauge = meter.create_gauge(
-        "social.archive.cleanup.failed",
-        unit="1",
-        description="Number of items that failed cleanup from the source platform in this run",
-    )
-
     youtube = _get_youtube_write_client()
     cleaned_ids: list[int] = []
     failed_ids: list[str] = []
@@ -349,7 +304,18 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
 
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
-    with task_root_span(ti, task_provider, parent_context, next_task_id="remove_cleaned_items") as span:
+    with instrument_task_context({}) as span:
+        meter = get_meter("social.archive.cleanup")
+        cleaned_gauge = meter.create_gauge(
+            "social.archive.cleanup.cleaned",
+            unit="1",
+            description="Number of items successfully cleaned from the source platform in this run",
+        )
+        failed_gauge = meter.create_gauge(
+            "social.archive.cleanup.failed",
+            unit="1",
+            description="Number of items that failed cleanup from the source platform in this run",
+        )
         span.set_attribute("youtube.items_to_clean", len(youtube_items))
 
         with otel_task_tracer.start_child_span(span_name="youtube.remove batch") as batch_span:
@@ -421,10 +387,9 @@ def cleanup_youtube(flagged_items: list[dict], ti) -> list[int]:
         span.set_attribute("youtube.items_cleaned", len(cleaned_ids))
         span.set_attribute("youtube.items_failed", len(failed_ids))
         logger.info(f"YouTube cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed")
+        cleaned_gauge.set(len(cleaned_ids), {"source": "youtube"})
+        failed_gauge.set(len(failed_ids), {"source": "youtube"})
 
-    cleaned_gauge.set(len(cleaned_ids), {"source": "youtube"})
-    failed_gauge.set(len(failed_ids), {"source": "youtube"})
-    shutdown_providers(task_provider, meter_provider)
     return cleaned_ids
 
 
@@ -443,24 +408,6 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    meter_provider = create_meter_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    parent_context = resolve_parent_context(
-        ti, otel_task_tracer, previous_task_id="get_flagged_items"
-    )
-
-    meter = meter_provider.get_meter("social.archive.cleanup")
-    cleaned_gauge = meter.create_gauge(
-        "social.archive.cleanup.cleaned",
-        unit="1",
-        description="Number of items successfully cleaned from the source platform in this run",
-    )
-    failed_gauge = meter.create_gauge(
-        "social.archive.cleanup.failed",
-        unit="1",
-        description="Number of items that failed cleanup from the source platform in this run",
-    )
-
     token = Variable.get("GITHUB_TOKEN")
     headers = {
         "Authorization": f"Bearer {token}",
@@ -471,7 +418,18 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
     cleaned_ids: list[int] = []
     failed_ids: list[str] = []
 
-    with task_root_span(ti, task_provider, parent_context, next_task_id="remove_cleaned_items") as span:
+    with instrument_task_context({}) as span:
+        meter = get_meter("social.archive.cleanup")
+        cleaned_gauge = meter.create_gauge(
+            "social.archive.cleanup.cleaned",
+            unit="1",
+            description="Number of items successfully cleaned from the source platform in this run",
+        )
+        failed_gauge = meter.create_gauge(
+            "social.archive.cleanup.failed",
+            unit="1",
+            description="Number of items that failed cleanup from the source platform in this run",
+        )
         span.set_attribute("github.items_to_clean", len(github_items))
 
         with otel_task_tracer.start_child_span(span_name="github.unstar batch") as batch_span:
@@ -526,10 +484,9 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
         span.set_attribute("github.items_cleaned", len(cleaned_ids))
         span.set_attribute("github.items_failed", len(failed_ids))
         logger.info(f"GitHub cleanup: {len(cleaned_ids)} cleaned, {len(failed_ids)} failed")
+        cleaned_gauge.set(len(cleaned_ids), {"source": "github"})
+        failed_gauge.set(len(failed_ids), {"source": "github"})
 
-    cleaned_gauge.set(len(cleaned_ids), {"source": "github"})
-    failed_gauge.set(len(failed_ids), {"source": "github"})
-    shutdown_providers(task_provider, meter_provider)
     return cleaned_ids
 
 
@@ -547,11 +504,8 @@ def remove_cleaned_items(cleaned_id_lists: list[list[int]], ti) -> None:
         return
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("social-archive-cleanup", ti.run_id, ti.task_id)
-    # Multiple upstream tasks — fall back to Airflow carrier for context
-    parent_context = resolve_parent_context(ti, otel_task_tracer)
 
-    with task_root_span(ti, task_provider, parent_context) as span:
+    with instrument_task_context({}) as span:
         hook = PostgresHook(postgres_conn_id="social_archive_db")
         with hook.get_conn() as conn:
             with conn.cursor() as cur:
@@ -563,8 +517,6 @@ def remove_cleaned_items(cleaned_id_lists: list[list[int]], ti) -> None:
 
         span.set_attribute("items.deleted", len(all_ids))
         logger.info(f"Removed {len(all_ids)} items from archive database")
-
-    shutdown_providers(task_provider)
 
 
 # ---------------------------------------------------------------------------

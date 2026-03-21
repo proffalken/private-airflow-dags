@@ -17,15 +17,8 @@ from airflow.sdk import dag, task, Variable
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
-from otel_utils import (
-    create_task_provider,
-    create_meter_provider,
-    instrument_llm,
-    resolve_parent_context,
-    task_root_span,
-    parse_llm_json,
-    shutdown_providers,
-)
+from airflow_otel import instrument_task_context, get_meter
+from dag_utils import instrument_llm, parse_llm_json
 
 logger = logging.getLogger("airflow.github_stars_dag")
 
@@ -87,16 +80,6 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
     logger.info(f"Getting GitHub starred repos — DAG: {ti.dag_id}, Run: {ti.run_id}")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("github-stars-import", ti.run_id, ti.task_id)
-    meter_provider = create_meter_provider("github-stars-import", ti.run_id, ti.task_id)
-    parent_context = resolve_parent_context(ti, otel_task_tracer)
-
-    meter = meter_provider.get_meter("github.stars")
-    repo_gauge = meter.create_gauge(
-        "github.stars.repo_count",
-        unit="1",
-        description="Number of new GitHub starred repos fetched in this run",
-    )
 
     try:
         hook = PostgresHook(postgres_conn_id="social_archive_db")
@@ -113,7 +96,14 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
     sorted_repos: dict[str, list[dict]] = {}
     new_count = 0
 
-    with task_root_span(ti, task_provider, parent_context, next_task_id="analyse_and_store") as span:
+    with instrument_task_context({}) as span:
+        meter = get_meter("github.stars")
+        repo_gauge = meter.create_gauge(
+            "github.stars.repo_count",
+            unit="1",
+            description="Number of new GitHub starred repos fetched in this run",
+        )
+
         with otel_task_tracer.start_child_span(span_name="fetch_starred_repos"):
             all_repos = _fetch_all_starred_repos(token)
             logger.info(f"Total starred repos: {len(all_repos)}")
@@ -144,9 +134,8 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
 
         span.set_attribute("github.new_repos", new_count)
         logger.info(f"=== {new_count} new GitHub starred repos to process")
+        repo_gauge.set(new_count)
 
-    repo_gauge.set(new_count)
-    shutdown_providers(task_provider, meter_provider)
     return sorted_repos
 
 
@@ -168,16 +157,12 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
         raise AirflowSkipException("No new GitHub starred repos to analyse")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("github-stars-import", ti.run_id, ti.task_id)
-    instrument_llm(task_provider)
-    parent_context = resolve_parent_context(
-        ti, otel_task_tracer, previous_task_id="get_starred_repos"
-    )
 
     client = OpenAI(base_url="http://ollama.ollama.svc.cluster.local:11434/v1", api_key="ollama")
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
-    with task_root_span(ti, task_provider, parent_context):
+    with instrument_task_context({}) as span:
+        instrument_llm()
         with hook.get_conn() as conn:
             with conn.cursor() as cursor:
                 with otel_task_tracer.start_child_span(span_name="create_schema"):
@@ -201,7 +186,7 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                     conn.commit()
 
                 inserted = 0
-                with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as span:
+                with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as insert_span:
                     for language, items in sorted_repos.items():
                         language_tag = language.lower().replace(" ", "-")
 
@@ -297,10 +282,9 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                                 f"tags={merged_tags} ({inserted} total)"
                             )
 
-                    span.set_attribute("items.inserted", inserted)
+                    insert_span.set_attribute("items.inserted", inserted)
                     logger.info(f"=== Finished — {inserted} items stored")
 
-    shutdown_providers(task_provider)
     logger.info("=" * 80)
 
 
