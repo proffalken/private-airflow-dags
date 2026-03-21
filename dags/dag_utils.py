@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 def instrument_llm() -> None:
     """Activate OTel GenAI instrumentation for the OpenAI SDK (and Ollama-compatible APIs)."""
-    from opentelemetry.instrumentation.openai import OpenAIInstrumentor
+    from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
     OpenAIInstrumentor().instrument()
 
 
