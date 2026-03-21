@@ -31,6 +31,7 @@ logger = logging.getLogger("airflow.project_sizer")
 VALID_ESTIMATES = {"quick", "afternoon", "full_day", "multi_day", "not_a_project"}
 
 SIZING_PROMPT = """\
+/no_think
 You are a software project estimator. Given information about a saved item \
 (a GitHub repo, Reddit post, YouTube video, article, or similar), estimate \
 how long it would take an experienced developer to build or implement \
@@ -192,7 +193,7 @@ def project_sizer():
                         try:
                             response = client.chat.completions.create(
                                 model=OLLAMA_MODEL,
-                                max_tokens=128,
+                                max_tokens=256,
                                 temperature=0.2,
                                 messages=[{"role": "user", "content": prompt}],
                             )
