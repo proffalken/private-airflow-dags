@@ -89,17 +89,27 @@ def project_sizer():
                 if line:
                     logger.info("pull: %s", line.decode())
 
-        logger.info("Pull complete. Waiting for model to respond to inference...")
+        # Load model into VRAM via native API (no prompt = just load, don't infer)
+        logger.info("Loading model into memory...")
+        resp = requests.post(
+            f"{ollama_base}/api/generate",
+            json={"model": OLLAMA_MODEL, "keep_alive": "30m"},
+            timeout=300,
+        )
+        resp.raise_for_status()
+        logger.info("Model loaded. Verifying inference...")
+
         client = get_llm_client()
-        for attempt in range(24):  # up to 2 minutes
+        for attempt in range(12):  # up to 1 minute
             try:
                 response = client.chat.completions.create(
                     model=OLLAMA_MODEL,
-                    max_tokens=1,
-                    messages=[{"role": "user", "content": "hi"}],
+                    max_tokens=10,
+                    messages=[{"role": "user", "content": "Reply with the word OK."}],
                 )
-                if response.choices and response.choices[0].message.content:
-                    logger.info("Model ready after %d attempt(s)", attempt + 1)
+                content = response.choices[0].message.content if response.choices else None
+                if content is not None:
+                    logger.info("Model ready (response: %r)", content[:50])
                     return
             except Exception as exc:
                 logger.info("Warm-up attempt %d: %s", attempt + 1, exc)
