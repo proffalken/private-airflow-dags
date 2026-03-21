@@ -39,13 +39,13 @@ class _DiagnosticExporter(SpanExporter):
     def __init__(self, inner: SpanExporter) -> None:
         self._inner = inner
 
-    def export(self, spans, timeout_millis: float = 10_000) -> SpanExportResult:
+    def export(self, spans, **kwargs) -> SpanExportResult:
         names = [s.name for s in spans]
         kinds = [str(getattr(s, "kind", "?")) for s in spans]
         sampled = [s.context.trace_flags.sampled for s in spans]
         _log.info("[DiagExporter] export() called: names=%s kinds=%s sampled=%s", names, kinds, sampled)
         try:
-            result = self._inner.export(spans, timeout_millis=timeout_millis)
+            result = self._inner.export(spans)
             _log.info("[DiagExporter] export() result: %s for %s", result, names)
             return result
         except Exception as exc:
