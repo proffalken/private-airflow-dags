@@ -8,6 +8,15 @@ import re
 
 logger = logging.getLogger(__name__)
 
+OLLAMA_BASE_URL = "http://ollama.ollama.svc.cluster.local:11434/v1"
+OLLAMA_MODEL = "huihui_ai/qwen3-abliterated:4b"
+
+
+def get_llm_client():
+    """Return an OpenAI-compatible client pointed at the local Ollama instance."""
+    from openai import OpenAI
+    return OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
+
 
 def instrument_llm() -> None:
     """Activate OTel GenAI instrumentation for the OpenAI SDK (and Ollama-compatible APIs)."""

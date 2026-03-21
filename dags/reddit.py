@@ -6,7 +6,6 @@ import json
 
 import pendulum
 
-from openai import OpenAI
 
 from airflow.exceptions import AirflowSkipException
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -17,7 +16,7 @@ from airflow.traces.tracer import Trace
 import praw
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import instrument_llm, instrument_requests, parse_llm_json
+from dag_utils import get_llm_client, instrument_llm, instrument_requests, parse_llm_json, OLLAMA_MODEL
 
 logger = logging.getLogger("airflow.reddit_dag")
 
@@ -117,7 +116,7 @@ def analyse_and_store(sorted_posts, ti):
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
-    client = OpenAI(base_url="http://ollama.ollama.svc.cluster.local:11434/v1", api_key="ollama")
+    client = get_llm_client()
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
     with instrument_task_context({}) as span:
@@ -165,7 +164,7 @@ def analyse_and_store(sorted_posts, ti):
                                 llm_span.set_attribute("item.subreddit", subreddit)
 
                                 response = client.chat.completions.create(
-                                    model="dolphin-mistral:latest",
+                                    model=OLLAMA_MODEL,
                                     max_tokens=512,
                                     messages=[{
                                         "role": "user",

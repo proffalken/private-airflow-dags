@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -48,7 +48,8 @@ async def list_items(
     count_sql = f"SELECT COUNT(*) FROM saved_items {where}"
     data_sql = f"""
         SELECT id, title, uri, body, source_context, type,
-               summary, tags, flagged_for_deletion, saved_at
+               summary, tags, flagged_for_deletion, saved_at,
+               time_estimate, estimate_reasoning
         FROM saved_items {where}
         ORDER BY saved_at DESC NULLS LAST
         LIMIT %s OFFSET %s
@@ -73,6 +74,8 @@ async def list_items(
             tags=r[7] or [],
             flagged_for_deletion=r[8] or False,
             saved_at=r[9],
+            time_estimate=r[10],
+            estimate_reasoning=r[11],
         )
         for r in rows
     ]
@@ -139,3 +142,49 @@ async def flag_item(
     if not row:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": item_id, "flagged_for_deletion": body.flagged_for_deletion}
+
+
+TimeEstimate = Literal["quick", "afternoon", "full_day", "multi_day"]
+
+
+@router.get("/api/suggest", response_model=list[ItemResponse])
+async def suggest_items(
+    time: TimeEstimate = Query(..., description="Available time budget"),
+    limit: int = Query(default=5, le=20),
+    db=Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    """Return random items matching the requested time estimate."""
+    async with db.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT id, title, uri, body, source_context, type,
+                   summary, tags, flagged_for_deletion, saved_at,
+                   time_estimate, estimate_reasoning
+            FROM saved_items
+            WHERE time_estimate = %s
+              AND flagged_for_deletion = FALSE
+            ORDER BY RANDOM()
+            LIMIT %s
+            """,
+            (time, limit),
+        )
+        rows = await cur.fetchall()
+
+    return [
+        ItemResponse(
+            id=r[0],
+            title=r[1],
+            uri=r[2],
+            body=r[3],
+            source_context=r[4],
+            type=r[5],
+            summary=r[6],
+            tags=r[7] or [],
+            flagged_for_deletion=r[8] or False,
+            saved_at=r[9],
+            time_estimate=r[10],
+            estimate_reasoning=r[11],
+        )
+        for r in rows
+    ]

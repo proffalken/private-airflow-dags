@@ -119,6 +119,9 @@ export default async function Home({
         <h1 className="text-2xl font-bold text-gray-900">Social Archive</h1>
         <div className="flex items-center gap-4">
           <span className="text-sm text-gray-500">{data.total.toLocaleString()} items</span>
+          <a href="/build" className="text-sm text-blue-600 hover:text-blue-800 font-medium">
+            What can I build?
+          </a>
           <a
             href="/api/auth/logout"
             className="text-sm text-gray-500 hover:text-gray-700"

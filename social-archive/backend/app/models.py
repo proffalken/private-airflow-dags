@@ -29,6 +29,8 @@ class ItemResponse(BaseModel):
     tags: list[str] = []
     flagged_for_deletion: bool = False
     saved_at: Optional[datetime] = None
+    time_estimate: Optional[str] = None
+    estimate_reasoning: Optional[str] = None
 
 
 class ItemsResponse(BaseModel):

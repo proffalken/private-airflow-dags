@@ -9,7 +9,6 @@ import requests
 
 import requests
 
-from openai import OpenAI
 
 from airflow.exceptions import AirflowSkipException
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -18,7 +17,7 @@ from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import instrument_llm, parse_llm_json
+from dag_utils import get_llm_client, instrument_llm, parse_llm_json, OLLAMA_MODEL
 
 logger = logging.getLogger("airflow.github_stars_dag")
 
@@ -158,7 +157,7 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
-    client = OpenAI(base_url="http://ollama.ollama.svc.cluster.local:11434/v1", api_key="ollama")
+    client = get_llm_client()
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
     with instrument_task_context({}) as span:
@@ -222,7 +221,7 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                                 )
 
                                 response = client.chat.completions.create(
-                                    model="dolphin-mistral:latest",
+                                    model=OLLAMA_MODEL,
                                     max_tokens=512,
                                     messages=[{
                                         "role": "user",
