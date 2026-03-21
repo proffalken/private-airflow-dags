@@ -23,12 +23,41 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.trace import SpanKind
 
 _log = logging.getLogger("airflow.otel_utils")
+
+
+class _DiagnosticExporter(SpanExporter):
+    """Thin wrapper that logs every export attempt and its result.
+
+    Exists purely for debugging — remove once export is confirmed working.
+    """
+    def __init__(self, inner: SpanExporter) -> None:
+        self._inner = inner
+
+    def export(self, spans, timeout_millis: float = 10_000) -> SpanExportResult:
+        names = [s.name for s in spans]
+        kinds = [str(getattr(s, "kind", "?")) for s in spans]
+        sampled = [s.context.trace_flags.sampled for s in spans]
+        _log.info("[DiagExporter] export() called: names=%s kinds=%s sampled=%s", names, kinds, sampled)
+        try:
+            result = self._inner.export(spans, timeout_millis=timeout_millis)
+            _log.info("[DiagExporter] export() result: %s for %s", result, names)
+            return result
+        except Exception as exc:
+            _log.error("[DiagExporter] export() EXCEPTION: %s for %s", exc, names, exc_info=True)
+            return SpanExportResult.FAILURE
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return self._inner.force_flush(timeout_millis)
+
+    def shutdown(self) -> None:
+        self._inner.shutdown()
+
 
 # Guards for idempotent instrumentation
 _requests_instrumented = False
@@ -101,7 +130,9 @@ def create_task_provider(dag_name: str, dag_run_id: str, task_id: str = "") -> T
     if base:
         endpoint = f"{base}/v1/traces"
         _log.info("[OTLPSpanExporter] Connecting to OpenTelemetry Collector at %s", endpoint)
-        provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+        provider.add_span_processor(
+            SimpleSpanProcessor(_DiagnosticExporter(OTLPSpanExporter(endpoint=endpoint)))
+        )
     return provider
 
 
@@ -294,7 +325,10 @@ def task_root_span(
             )
         else:
             _log.info(
-                "Task span started",
+                "Task span started: is_recording=%s sampled=%s kind=%s",
+                span.is_recording(),
+                ctx.trace_flags.sampled,
+                span.kind,
                 extra={**get_trace_context(), "airflow.dag_id": ti.dag_id, "airflow.task_id": ti.task_id},
             )
 
