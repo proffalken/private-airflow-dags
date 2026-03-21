@@ -1,10 +1,15 @@
 from typing import Any, Callable, Dict, Optional
 
-# Imported at module level so tests can patch airflow_otel._context.get_current_context
+# Imported at module level so tests can patch airflow_otel._context.get_current_context.
+# Airflow 3.x moved get_current_context to airflow.sdk; fall back to the deprecated
+# airflow.operators.python location for older Airflow versions.
 try:
-    from airflow.operators.python import get_current_context
-except Exception:  # pragma: no cover
-    get_current_context = None  # type: ignore[assignment]
+    from airflow.sdk import get_current_context
+except ImportError:
+    try:
+        from airflow.operators.python import get_current_context  # type: ignore[no-redef]
+    except Exception:  # pragma: no cover
+        get_current_context = None  # type: ignore[assignment]
 
 
 def extract_airflow_context(kwargs: Dict[str, Any]) -> Dict[str, Any]:

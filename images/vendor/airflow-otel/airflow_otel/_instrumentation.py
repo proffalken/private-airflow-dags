@@ -65,8 +65,13 @@ def _otlp_endpoint() -> str:
 
 
 def _make_exporter() -> OTLPSpanExporter:
-    """Build the OTLP HTTP span exporter. Extracted for test patching."""
-    return OTLPSpanExporter(endpoint=_otlp_endpoint(), headers=_otlp_headers())
+    """Build the OTLP HTTP span exporter. Extracted for test patching.
+
+    Do NOT pass endpoint= explicitly: when the SDK reads OTEL_EXPORTER_OTLP_ENDPOINT
+    from the environment it automatically appends /v1/traces.  Passing the base
+    URL as an explicit argument bypasses that logic and causes 404s.
+    """
+    return OTLPSpanExporter()
 
 
 def _build_resource(dag_id: str, task_id: str) -> Resource:
@@ -113,8 +118,6 @@ def setup_otel(
     global _tracer_provider, _meter_provider, _logger_provider
 
     resource = _build_resource(dag_id, task_id)
-    endpoint = _otlp_endpoint()
-    headers = _otlp_headers()
 
     is_test = _exporter_override is not None or _TEST_EXPORTER is not None
     span_exporter = _exporter_override if _exporter_override is not None else (_TEST_EXPORTER or _make_exporter())
@@ -132,12 +135,20 @@ def setup_otel(
 
     trace.set_tracer_provider(_tracer_provider)
 
-    metric_exporter = OTLPMetricExporter(endpoint=endpoint, headers=headers)
-    reader = PeriodicExportingMetricReader(metric_exporter, export_interval_millis=30_000)
-    _meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
-    metrics.set_meter_provider(_meter_provider)
+    # Airflow 3.x initialises its own global MeterProvider at startup.
+    # set_meter_provider() is a one-time operation; attempting to override it
+    # silently fails and logs a warning.  If a real provider is already set,
+    # reuse it so our get_meter() calls land in the same pipeline.
+    existing_mp = metrics.get_meter_provider()
+    if isinstance(existing_mp, MeterProvider):
+        _meter_provider = existing_mp
+    else:
+        metric_exporter = OTLPMetricExporter()
+        reader = PeriodicExportingMetricReader(metric_exporter, export_interval_millis=30_000)
+        _meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
+        metrics.set_meter_provider(_meter_provider)
 
-    log_exporter = OTLPLogExporter(endpoint=endpoint, headers=headers)
+    log_exporter = OTLPLogExporter()
     _logger_provider = LoggerProvider(resource=resource)
     _logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
     set_logger_provider(_logger_provider)
