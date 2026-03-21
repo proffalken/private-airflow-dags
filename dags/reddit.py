@@ -16,17 +16,8 @@ from airflow.traces.tracer import Trace
 
 import praw
 
-from otel_utils import (
-    create_task_provider,
-    create_meter_provider,
-    instrument_requests,
-    instrument_llm,
-    resolve_parent_context,
-    task_root_span,
-    get_trace_context,
-    parse_llm_json,
-    shutdown_providers,
-)
+from airflow_otel import instrument_task_context, get_meter
+from dag_utils import instrument_llm, instrument_requests, parse_llm_json
 
 logger = logging.getLogger("airflow.reddit_dag")
 
@@ -36,9 +27,6 @@ def get_saved_posts(ti):
     logger.info(f"Getting saved posts - DAG: {ti.dag_id}, Run: {ti.run_id}")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("reddit-import", ti.run_id, ti.task_id)
-    meter_provider = create_meter_provider("reddit-import", ti.run_id, ti.task_id)
-    parent_context = resolve_parent_context(ti, otel_task_tracer)
 
     reddit = praw.Reddit(
         client_id=Variable.get("REDDIT_CLIENT_ID"),
@@ -46,18 +34,6 @@ def get_saved_posts(ti):
         user_agent="proffalken-airflow",
         username=Variable.get("REDDIT_USER"),
         password=Variable.get("REDDIT_PASSWORD"),
-    )
-
-    meter = meter_provider.get_meter("reddit.saved")
-    post_gauge = meter.create_gauge(
-        "reddit.saved.post_count",
-        unit="1",
-        description="Number of new saved Reddit posts fetched in this run",
-    )
-    comment_gauge = meter.create_gauge(
-        "reddit.saved.comment_count",
-        unit="1",
-        description="Number of new saved Reddit comments fetched in this run",
     )
 
     # Fetch already-known IDs so we only process new items
@@ -74,8 +50,19 @@ def get_saved_posts(ti):
     post_count = 0
     comment_count = 0
 
-    with task_root_span(ti, task_provider, parent_context, next_task_id="analyse_and_store") as span:
-        instrument_requests(task_provider)
+    with instrument_task_context({}) as span:
+        instrument_requests()
+        meter = get_meter("reddit.saved")
+        post_gauge = meter.create_gauge(
+            "reddit.saved.post_count",
+            unit="1",
+            description="Number of new saved Reddit posts fetched in this run",
+        )
+        comment_gauge = meter.create_gauge(
+            "reddit.saved.comment_count",
+            unit="1",
+            description="Number of new saved Reddit comments fetched in this run",
+        )
 
         with otel_task_tracer.start_child_span(span_name="fetch_saved_items"):
             for item in reddit.user.me().saved(limit=None):
@@ -111,10 +98,9 @@ def get_saved_posts(ti):
 
             logger.info(f"=== {post_count} new posts and {comment_count} new comments to process")
 
-    post_gauge.set(post_count)
-    comment_gauge.set(comment_count)
+        post_gauge.set(post_count)
+        comment_gauge.set(comment_count)
 
-    shutdown_providers(task_provider, meter_provider)
     logger.info("Reddit saved post download finished.")
     return sorted_posts
 
@@ -130,15 +116,13 @@ def analyse_and_store(sorted_posts, ti):
         raise AirflowSkipException("No new items to analyse")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("reddit-import", ti.run_id, ti.task_id)
-    instrument_requests(task_provider)
-    instrument_llm(task_provider)
-    parent_context = resolve_parent_context(ti, otel_task_tracer, previous_task_id="get_saved_posts")
 
     client = OpenAI(base_url="http://ollama.ollama.svc.cluster.local:11434/v1", api_key="ollama")
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
-    with task_root_span(ti, task_provider, parent_context):
+    with instrument_task_context({}) as span:
+        instrument_requests()
+        instrument_llm()
         with hook.get_conn() as conn:
             with conn.cursor() as cursor:
                 with otel_task_tracer.start_child_span(span_name="create_schema"):
@@ -168,7 +152,7 @@ def analyse_and_store(sorted_posts, ti):
                     conn.commit()
 
                 inserted = 0
-                with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as span:
+                with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as insert_span:
                     for subreddit, items in sorted_posts.items():
                         for item in items:
                             label = item['title'] or item['body'][:50]
@@ -221,10 +205,9 @@ def analyse_and_store(sorted_posts, ti):
                             inserted += cursor.rowcount
                             logger.info(f"=== Stored item {item['external_id']} ({inserted} total)")
 
-                    span.set_attribute("items.inserted", inserted)
+                    insert_span.set_attribute("items.inserted", inserted)
                     logger.info(f"=== Finished — {inserted} items stored")
 
-    shutdown_providers(task_provider)
     logger.info("=" * 80)
 
 

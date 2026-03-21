@@ -18,15 +18,8 @@ from airflow.sdk import dag, task, Variable
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
-from otel_utils import (
-    create_task_provider,
-    create_meter_provider,
-    instrument_llm,
-    resolve_parent_context,
-    task_root_span,
-    parse_llm_json,
-    shutdown_providers,
-)
+from airflow_otel import instrument_task_context, get_meter
+from dag_utils import instrument_llm, parse_llm_json
 
 logger = logging.getLogger("airflow.youtube_dag")
 
@@ -109,16 +102,6 @@ def get_playlist_videos(ti) -> dict[str, list[dict]]:
     logger.info(f"Getting YouTube playlist videos — DAG: {ti.dag_id}, Run: {ti.run_id}")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("youtube-import", ti.run_id, ti.task_id)
-    meter_provider = create_meter_provider("youtube-import", ti.run_id, ti.task_id)
-    parent_context = resolve_parent_context(ti, otel_task_tracer)
-
-    meter = meter_provider.get_meter("youtube.playlists")
-    video_gauge = meter.create_gauge(
-        "youtube.playlist.video_count",
-        unit="1",
-        description="Number of new YouTube playlist videos fetched in this run",
-    )
 
     try:
         hook = PostgresHook(postgres_conn_id="social_archive_db")
@@ -135,7 +118,14 @@ def get_playlist_videos(ti) -> dict[str, list[dict]]:
     sorted_videos: dict[str, list[dict]] = {}
     new_count = 0
 
-    with task_root_span(ti, task_provider, parent_context, next_task_id="analyse_and_store") as span:
+    with instrument_task_context({}) as span:
+        meter = get_meter("youtube.playlists")
+        video_gauge = meter.create_gauge(
+            "youtube.playlist.video_count",
+            unit="1",
+            description="Number of new YouTube playlist videos fetched in this run",
+        )
+
         with otel_task_tracer.start_child_span(span_name="fetch_playlists"):
             playlists = []
             request = youtube.playlists().list(
@@ -197,9 +187,8 @@ def get_playlist_videos(ti) -> dict[str, list[dict]]:
 
         span.set_attribute("youtube.new_videos", new_count)
         logger.info(f"=== {new_count} new YouTube videos to process")
+        video_gauge.set(new_count)
 
-    video_gauge.set(new_count)
-    shutdown_providers(task_provider, meter_provider)
     return sorted_videos
 
 
@@ -221,16 +210,12 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
         raise AirflowSkipException("No new YouTube videos to analyse")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("youtube-import", ti.run_id, ti.task_id)
-    instrument_llm(task_provider)
-    parent_context = resolve_parent_context(
-        ti, otel_task_tracer, previous_task_id="get_playlist_videos"
-    )
 
     client = OpenAI(base_url="http://ollama.ollama.svc.cluster.local:11434/v1", api_key="ollama")
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
-    with task_root_span(ti, task_provider, parent_context):
+    with instrument_task_context({}) as span:
+        instrument_llm()
         with hook.get_conn() as conn:
             with conn.cursor() as cursor:
                 with otel_task_tracer.start_child_span(span_name="create_schema"):
@@ -254,7 +239,7 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                     conn.commit()
 
                 inserted = 0
-                with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as span:
+                with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as insert_span:
                     for playlist_name, items in sorted_videos.items():
                         playlist_tag = playlist_name_to_tag(playlist_name)
 
@@ -349,10 +334,9 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                                 f"tags={merged_tags} ({inserted} total)"
                             )
 
-                    span.set_attribute("items.inserted", inserted)
+                    insert_span.set_attribute("items.inserted", inserted)
                     logger.info(f"=== Finished — {inserted} items stored")
 
-    shutdown_providers(task_provider)
     logger.info("=" * 80)
 
 

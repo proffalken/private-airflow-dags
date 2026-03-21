@@ -62,15 +62,8 @@ from airflow.sdk import dag, task, Variable
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
-from otel_utils import (
-    create_task_provider,
-    create_meter_provider,
-    instrument_llm,
-    resolve_parent_context,
-    task_root_span,
-    parse_llm_json,
-    shutdown_providers,
-)
+from airflow_otel import instrument_task_context, get_meter
+from dag_utils import instrument_llm, parse_llm_json
 
 logger = logging.getLogger("airflow.instagram_dag")
 
@@ -134,16 +127,6 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
     logger.info(f"Getting Instagram saved posts — DAG: {ti.dag_id}, Run: {ti.run_id}")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("instagram-import", ti.run_id, ti.task_id)
-    meter_provider = create_meter_provider("instagram-import", ti.run_id, ti.task_id)
-    parent_context = resolve_parent_context(ti, otel_task_tracer)
-
-    meter = meter_provider.get_meter("instagram.saved")
-    media_gauge = meter.create_gauge(
-        "instagram.saved.media_count",
-        unit="1",
-        description="Number of new saved Instagram media items fetched in this run",
-    )
 
     # Fetch already-known IDs to skip re-processing
     try:
@@ -163,7 +146,14 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
 
     cl = get_instagram_client()
 
-    with task_root_span(ti, task_provider, parent_context, next_task_id="analyse_and_store") as span:
+    with instrument_task_context({}) as span:
+        meter = get_meter("instagram.saved")
+        media_gauge = meter.create_gauge(
+            "instagram.saved.media_count",
+            unit="1",
+            description="Number of new saved Instagram media items fetched in this run",
+        )
+
         with otel_task_tracer.start_child_span(span_name="fetch_collections"):
             collections = cl.collections()
             logger.info(f"Found {len(collections)} Instagram collections")
@@ -261,10 +251,8 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
         logger.info(f"Found {uncollected_count} uncollected saves")
         span.set_attribute("instagram.new_items", new_count)
         logger.info(f"=== {new_count} new Instagram items to process")
+        media_gauge.set(new_count)
 
-    media_gauge.set(new_count)
-
-    shutdown_providers(task_provider, meter_provider)
     return sorted_posts
 
 
@@ -286,16 +274,12 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
         raise AirflowSkipException("No new Instagram items to analyse")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
-    task_provider = create_task_provider("instagram-import", ti.run_id, ti.task_id)
-    instrument_llm(task_provider)
-    parent_context = resolve_parent_context(
-        ti, otel_task_tracer, previous_task_id="get_saved_posts"
-    )
 
     client = OpenAI(base_url="http://ollama.ollama.svc.cluster.local:11434/v1", api_key="ollama")
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
-    with task_root_span(ti, task_provider, parent_context):
+    with instrument_task_context({}) as span:
+        instrument_llm()
         with hook.get_conn() as conn:
             with conn.cursor() as cursor:
                 with otel_task_tracer.start_child_span(span_name="create_schema"):
@@ -319,7 +303,7 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                     conn.commit()
 
                 inserted = 0
-                with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as span:
+                with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as insert_span:
                     for collection_name, items in sorted_posts.items():
                         for item in items:
                             external_id = item["external_id"]
@@ -428,10 +412,9 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                                 f"tags={merged_tags} ({inserted} total)"
                             )
 
-                    span.set_attribute("items.inserted", inserted)
+                    insert_span.set_attribute("items.inserted", inserted)
                     logger.info(f"=== Finished — {inserted} items stored")
 
-    shutdown_providers(task_provider)
     logger.info("=" * 80)
 
 
