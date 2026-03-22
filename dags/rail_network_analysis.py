@@ -318,11 +318,6 @@ def parse_corpus(corpus_path: str) -> dict[str, Any]:
     return {"locations_total": total, "locations_with_crs": with_crs}
 
 
-def _parse_cif_time(raw: str) -> str | None:
-    """Normalise CIF time fields: strip half-minute suffix H, return None if blank."""
-    t = raw.strip().rstrip("H")
-    return t if t else None
-
 
 @task
 def parse_schedule(schedule_path: str) -> dict[str, Any]:
@@ -353,164 +348,101 @@ def parse_schedule(schedule_path: str) -> dict[str, Any]:
             conn.commit()
             logger.info("Cleared %d existing schedules for %s", deleted, run_date)
 
-            # Stream-parse the CIF file
+            # Stream-parse the JSON Lines CIF file (JsonTimetableV1 format)
             schedule_count = 0
             stop_count = 0
             tocs_seen: set[str] = set()
             status_counts: dict[str, int] = {}
 
-            # Buffers for current schedule being assembled
-            current_schedule: dict[str, Any] | None = None
-            current_stops: list[tuple] = []
-            schedule_id: int | None = None
-
-            def flush_schedule(cur_) -> None:
-                nonlocal schedule_count, stop_count, schedule_id
-                if current_schedule is None:
-                    return
-                cur_.execute("""
-                    INSERT INTO rail_schedules
-                        (run_date, train_uid, date_runs_from, date_runs_to,
-                         days_run, train_status, train_category, toc_id, stp_indicator)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (run_date, train_uid, date_runs_from, stp_indicator)
-                    DO UPDATE SET
-                        date_runs_to   = EXCLUDED.date_runs_to,
-                        days_run       = EXCLUDED.days_run,
-                        train_status   = EXCLUDED.train_status,
-                        train_category = EXCLUDED.train_category,
-                        toc_id         = EXCLUDED.toc_id
-                    RETURNING id
-                """, (
-                    run_date,
-                    current_schedule["train_uid"],
-                    current_schedule["date_runs_from"],
-                    current_schedule["date_runs_to"],
-                    current_schedule["days_run"],
-                    current_schedule.get("train_status"),
-                    current_schedule.get("train_category"),
-                    current_schedule.get("toc_id"),
-                    current_schedule.get("stp_indicator"),
-                ))
-                row = cur_.fetchone()
-                schedule_id = row[0] if row else None
-                schedule_count += 1
-
-                if schedule_id and current_stops:
-                    cur_.executemany("""
-                        INSERT INTO rail_schedule_stops
-                            (schedule_id, stop_type, tiploc, sequence,
-                             arrive, depart, pass, platform, activity)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    """, [(schedule_id, *s) for s in current_stops])
-                    stop_count += len(current_stops)
-
             with otel_task_tracer.start_child_span(span_name="rail.parse.schedule.stream") as stream_span:
                 with conn.cursor() as cur:
-                    with gzip.open(schedule_path, "rt", encoding="latin-1") as f:
-                        stop_seq = 0
+                    with gzip.open(schedule_path, "rt", encoding="utf-8") as f:
                         lines_read = 0
                         for line in f:
                             lines_read += 1
-                            if len(line) < 2:
+                            if not line.strip():
                                 continue
-                            rec_type = line[:2]
 
-                            if rec_type == "BS":
-                                # Flush previous schedule before starting new one
-                                if current_schedule is not None:
-                                    flush_schedule(cur)
-                                    if schedule_count % INSERT_BATCH == 0:
-                                        conn.commit()
-                                        logger.info("Parsed %d schedules so far...", schedule_count)
+                            try:
+                                obj = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
 
-                                # Only process New records (full CIF should be all N, but be safe)
-                                transaction = line[2]
-                                if transaction == "D":
-                                    current_schedule = None
-                                    current_stops = []
-                                    continue
+                            sched = obj.get("JsonScheduleV1")
+                            if not sched:
+                                continue
 
-                                stp = line[79] if len(line) > 79 else "P"
-                                uid = line[3:9].strip()
-                                dfrom_raw = line[9:15].strip()
-                                dto_raw = line[15:21].strip()
+                            # Skip delete records
+                            if sched.get("transaction_type") == "Delete":
+                                continue
 
-                                def _cif_date(s: str):
-                                    if len(s) == 6:
-                                        try:
-                                            return f"20{s[:2]}-{s[2:4]}-{s[4:6]}"
-                                        except Exception:
-                                            pass
-                                    return None
+                            uid = sched.get("CIF_train_uid", "").strip()
+                            date_from = sched.get("schedule_start_date")
+                            date_to = sched.get("schedule_end_date")
+                            days_run = sched.get("schedule_days_runs", "")
+                            status = sched.get("train_status") or None
+                            stp = sched.get("CIF_stp_indicator") or None
+                            toc = sched.get("atoc_code") or None
+                            seg = sched.get("schedule_segment") or {}
+                            cat = seg.get("CIF_train_category") or None
 
-                                status = line[29].strip() or None
-                                cat = line[30:32].strip() or None
+                            if not uid or not date_from or not date_to:
+                                continue
 
-                                current_schedule = {
-                                    "train_uid": uid,
-                                    "date_runs_from": _cif_date(dfrom_raw),
-                                    "date_runs_to": _cif_date(dto_raw),
-                                    "days_run": line[21:28],
-                                    "train_status": status,
-                                    "train_category": cat,
-                                    "stp_indicator": stp,
-                                    "toc_id": None,
-                                }
-                                current_stops = []
-                                stop_seq = 0
-                                status_counts[status or "?"] = status_counts.get(status or "?", 0) + 1
-                                schedule_counter.add(1, {"record_type": "BS"})
+                            cur.execute("""
+                                INSERT INTO rail_schedules
+                                    (run_date, train_uid, date_runs_from, date_runs_to,
+                                     days_run, train_status, train_category, toc_id, stp_indicator)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                ON CONFLICT (run_date, train_uid, date_runs_from, stp_indicator)
+                                DO UPDATE SET
+                                    date_runs_to   = EXCLUDED.date_runs_to,
+                                    days_run       = EXCLUDED.days_run,
+                                    train_status   = EXCLUDED.train_status,
+                                    train_category = EXCLUDED.train_category,
+                                    toc_id         = EXCLUDED.toc_id
+                                RETURNING id
+                            """, (
+                                run_date, uid, date_from, date_to,
+                                days_run, status, cat, toc, stp,
+                            ))
+                            row = cur.fetchone()
+                            schedule_id = row[0] if row else None
+                            schedule_count += 1
 
-                            elif rec_type == "BX" and current_schedule is not None:
-                                toc = line[11:13].strip() or None
-                                if toc:
-                                    current_schedule["toc_id"] = toc
-                                    tocs_seen.add(toc)
-                                schedule_counter.add(1, {"record_type": "BX"})
+                            if toc:
+                                tocs_seen.add(toc)
+                            status_counts[status or "?"] = status_counts.get(status or "?", 0) + 1
+                            schedule_counter.add(1, {"record_type": "JsonScheduleV1"})
 
-                            elif rec_type == "LO" and current_schedule is not None:
-                                tiploc = line[2:9].strip()
-                                current_stops.append((
-                                    "LO", tiploc, stop_seq,
-                                    None,
-                                    _parse_cif_time(line[10:15]),
-                                    None,
-                                    line[19:22].strip() or None,
-                                    line[29:41].strip() or None,
-                                ))
-                                stop_seq += 1
-                                schedule_counter.add(1, {"record_type": "LO"})
+                            if schedule_id:
+                                stops = []
+                                for seq, loc in enumerate(seg.get("schedule_location", [])):
+                                    loc_type = loc.get("location_type") or loc.get("record_identity")
+                                    if loc_type not in ("LO", "LI", "LT"):
+                                        continue
+                                    stops.append((
+                                        loc_type,
+                                        loc.get("tiploc_code", "").strip(),
+                                        seq,
+                                        loc.get("arrival") or loc.get("public_arrival"),
+                                        loc.get("departure") or loc.get("public_departure"),
+                                        loc.get("pass"),
+                                        loc.get("platform"),
+                                        None,  # activity not in JSON format
+                                    ))
+                                if stops:
+                                    cur.executemany("""
+                                        INSERT INTO rail_schedule_stops
+                                            (schedule_id, stop_type, tiploc, sequence,
+                                             arrive, depart, pass, platform, activity)
+                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                    """, [(schedule_id, *s) for s in stops])
+                                    stop_count += len(stops)
 
-                            elif rec_type == "LI" and current_schedule is not None:
-                                tiploc = line[2:9].strip()
-                                current_stops.append((
-                                    "LI", tiploc, stop_seq,
-                                    _parse_cif_time(line[10:15]),
-                                    _parse_cif_time(line[15:20]),
-                                    _parse_cif_time(line[20:25]),
-                                    line[33:36].strip() or None,
-                                    line[42:54].strip() or None,
-                                ))
-                                stop_seq += 1
-                                schedule_counter.add(1, {"record_type": "LI"})
-
-                            elif rec_type == "LT" and current_schedule is not None:
-                                tiploc = line[2:9].strip()
-                                current_stops.append((
-                                    "LT", tiploc, stop_seq,
-                                    _parse_cif_time(line[10:15]),
-                                    None,
-                                    None,
-                                    line[19:22].strip() or None,
-                                    line[25:37].strip() or None,
-                                ))
-                                stop_seq += 1
-                                schedule_counter.add(1, {"record_type": "LT"})
-
-                        # Flush final schedule
-                        if current_schedule is not None:
-                            flush_schedule(cur)
+                            if schedule_count % INSERT_BATCH == 0:
+                                conn.commit()
+                                logger.info("Parsed %d schedules so far...", schedule_count)
 
                     conn.commit()
                     stream_span.set_attribute("cif.lines_read", lines_read)
