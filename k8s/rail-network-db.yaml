@@ -1,0 +1,12 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: rail-network
+  namespace: default
+spec:
+  cluster:
+    name: ossway-pg
+  databaseReclaimPolicy: retain
+  ensure: present
+  name: rail_network
+  owner: app
