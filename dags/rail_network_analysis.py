@@ -8,7 +8,7 @@ Data flow:
   fetch_corpus ──► parse_corpus ──────────────────────────┐
                                                            ├──► analyse_by_route ──────┐
   fetch_schedule ──► parse_schedule ──────────────────────┤                           │
-                          │               analyse_by_station ────────────────────────► aggregate ──► store_results
+                          │               analyse_by_station ────────────────────────► aggregate ──► store_results ──► llm_summary
                           └──► extract_toc_list ──► analyse_by_toc ───────────────────┘
 
 Airflow Variables required (Admin → Variables):
@@ -41,7 +41,7 @@ from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import instrument_requests
+from dag_utils import get_llm_client, instrument_llm, instrument_requests, parse_llm_json, OLLAMA_MODEL
 
 logger = logging.getLogger("airflow.rail_network_analysis")
 
@@ -956,6 +956,62 @@ def store_results(summary: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# LLM narrative summary
+# ---------------------------------------------------------------------------
+
+@task
+def llm_summary(summary: dict[str, Any], toc_result: dict[str, Any]) -> None:
+    """Ask the LLM to narrate the day's rail network metrics and log the result."""
+    run_date = summary["run_date"]
+    logger.info("=" * 80)
+    logger.info("Generating LLM narrative summary for %s", run_date)
+
+    otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
+    client = get_llm_client()
+
+    toc_lines = "\n".join(
+        f"  {toc}: {m['services']} services, {m['routes']} routes, {m['stations']} stations"
+        for toc, m in sorted(toc_result["toc_metrics"].items())
+    )
+
+    prompt = (
+        f"You are a railway analyst. Write a concise, plain-English summary of the "
+        f"UK rail network for {run_date} based on the following schedule data.\n\n"
+        f"Network totals:\n"
+        f"  Scheduled services: {summary['schedules_parsed']}\n"
+        f"  Active stations: {summary['stations_active']}\n"
+        f"  Unique routes: {summary['route_pairs']}\n"
+        f"  Train operating companies: {summary['tocs_active']}\n"
+        f"  Known locations (CORPUS): {summary['corpus_locations']}\n\n"
+        f"Per-operator breakdown:\n{toc_lines}\n\n"
+        f"Write 3-4 sentences highlighting the scale of operations, the busiest operators, "
+        f"and anything noteworthy. Be factual and concise."
+    )
+
+    with instrument_task_context({"stage": "llm_summary", "run_date": run_date}) as span:
+        instrument_requests()
+        instrument_llm()
+        with otel_task_tracer.start_child_span(span_name="llm.summarise_network") as llm_span:
+            llm_span.set_attribute("run_date", run_date)
+            llm_span.set_attribute("toc.count", summary["tocs_active"])
+
+            response = client.chat.completions.create(
+                model=OLLAMA_MODEL,
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            narrative = (response.choices[0].message.content or "").strip()
+            llm_span.set_attribute("summary.length", len(narrative))
+
+    logger.info("=" * 80)
+    logger.info("NETWORK SUMMARY — %s", run_date)
+    logger.info("=" * 80)
+    logger.info(narrative)
+    logger.info("=" * 80)
+
+
+# ---------------------------------------------------------------------------
 # DAG definition
 # ---------------------------------------------------------------------------
 
@@ -981,9 +1037,9 @@ def rail_network_analysis():
     route_result = analyse_by_route(corpus_result, parse_result)
     station_result = analyse_by_station(corpus_result, parse_result)
 
-    # Fan-in: aggregate then store
+    # Fan-in: aggregate, store, then narrate
     summary = aggregate_metrics(toc_result, route_result, station_result, parse_result, corpus_result)
-    store_results(summary)
+    store_results(summary) >> llm_summary(summary, toc_result)
 
 
 rail_network_analysis()
