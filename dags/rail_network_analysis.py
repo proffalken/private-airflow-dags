@@ -37,19 +37,37 @@ import requests
 
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import chain, dag, get_current_context, task, Variable
+# airflow.traces provides the Airflow-native OTel tracer. get_otel_tracer_for_task
+# returns a tracer already scoped to the current task's trace context, so any child
+# spans created from it are automatically nested under the task's root span.
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
+# instrument_task_context is the airflow-otel library's main entry point. It creates
+# a root span for the task and propagates Airflow's trace context (dag_id, run_id,
+# task_id) as span attributes. This is what links the task's telemetry back to the
+# wider DAG run trace in your observability tool.
+#
+# get_meter returns an OTel Meter scoped to the given name. Use a consistent naming
+# hierarchy (e.g. "rail.fetch", "rail.parse") so metrics group sensibly in dashboards.
 from airflow_otel import instrument_task_context, get_meter
+
+# dag_utils contains shared helpers for LLM access and OTel auto-instrumentation.
+# instrument_llm() activates OpenLLMetry so every OpenAI SDK call emits spans with
+# token counts, model names, and latency — without any manual instrumentation.
+# instrument_requests() similarly auto-instruments the requests library.
 from dag_utils import get_llm_client, instrument_llm, instrument_requests, parse_llm_json, OLLAMA_MODEL
 
 logger = logging.getLogger("airflow.rail_network_analysis")
 
 NROD_BASE = "https://datafeeds.networkrail.co.uk/ntrod"
 CORPUS_URL = f"{NROD_BASE}/SupportingFileAuthenticate?type=CORPUS"
+# CIF_ALL_FULL_DAILY with day=toc-full returns the complete consolidated timetable
+# as a gzip-compressed JSON Lines file (JsonTimetableV1 format, ~130MB compressed).
 CIF_URL = f"{NROD_BASE}/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full"
 
-# Batch size for DB inserts to avoid huge transactions
+# Batch size for DB inserts — keeps individual transactions small so that a failure
+# mid-parse only loses at most INSERT_BATCH records rather than the whole file.
 INSERT_BATCH = 500
 
 
@@ -152,6 +170,7 @@ def _get_hook() -> PostgresHook:
 
 
 def _ensure_schema(conn) -> None:
+    """Idempotent schema creation — safe to call on every task startup."""
     with conn.cursor() as cur:
         for statement in SCHEMA_SQL.split(";"):
             stmt = statement.strip()
@@ -161,6 +180,7 @@ def _ensure_schema(conn) -> None:
 
 
 def _nrod_auth() -> tuple[str, str]:
+    """Read NROD credentials from Airflow Variables at task runtime."""
     return Variable.get("NROD_USERNAME"), Variable.get("NROD_PASSWORD")
 
 
@@ -170,13 +190,36 @@ def _nrod_auth() -> tuple[str, str]:
 
 @task
 def fetch_corpus(ti) -> str:
-    """Download CORPUS location reference JSON from NROD → temp file."""
+    """Download CORPUS location reference JSON from NROD → temp file.
+
+    CORPUS maps TIPLOC codes (the internal location identifiers used throughout
+    the timetable) to human-readable station names and CRS codes (the 3-letter
+    codes shown on departure boards). It is used to enrich the route and station
+    metrics with readable names rather than opaque codes.
+
+    Returns the path to the downloaded temp file so the next task can read it
+    without re-downloading. Airflow serialises this as an XCom string.
+    """
     logger.info("Fetching CORPUS reference data from NROD")
+    # Obtain a tracer scoped to this task's trace context. All child spans
+    # created from this tracer are automatically nested under the Airflow
+    # task span, giving a clear hierarchy in the waterfall view:
+    #   DAG run → task → rail.fetch.corpus
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
+    # instrument_task_context creates the root span for this task and injects
+    # the nrod.feed attribute. This attribute appears on every span and metric
+    # emitted inside this block, making it easy to filter all telemetry for a
+    # specific data source (e.g. show me only CORPUS-related traces).
     with instrument_task_context({"nrod.feed": "CORPUS"}) as span:
+        # instrument_requests() patches the requests library so every outbound
+        # HTTP call automatically emits a span with URL, method, status code,
+        # and duration. Without this, the download would be a black box in traces.
         instrument_requests()
         meter = get_meter("rail.fetch")
+        # Use a Gauge (not a Counter) for download size because a gauge represents
+        # a current value that can go up or down. If we re-run the same date the
+        # gauge reflects the latest download, rather than accumulating across runs.
         size_gauge = meter.create_gauge(
             "rail.corpus.download_bytes",
             unit="By",
@@ -184,7 +227,13 @@ def fetch_corpus(ti) -> str:
         )
 
         username, password = _nrod_auth()
+        # A child span wraps the actual HTTP download. This separates download
+        # latency from any processing done before or after, making it immediately
+        # obvious in a trace whether a slow task is waiting on the network or
+        # spending time on computation.
         with otel_task_tracer.start_child_span(span_name="rail.fetch.corpus") as fetch_span:
+            # Record the URL as a span attribute so you can see exactly which
+            # endpoint was called without having to dig into logs.
             fetch_span.set_attribute("http.url", CORPUS_URL)
             resp = requests.get(CORPUS_URL, auth=(username, password), stream=True, timeout=120)
             resp.raise_for_status()
@@ -199,6 +248,9 @@ def fetch_corpus(ti) -> str:
                 total_bytes += len(chunk)
             tmp.close()
 
+            # Record both the HTTP status and download size on the span so that
+            # a future alert can fire if the file is unexpectedly small (e.g. NROD
+            # returns an error page instead of the real data).
             fetch_span.set_attribute("http.status_code", resp.status_code)
             fetch_span.set_attribute("download.bytes", total_bytes)
             size_gauge.set(total_bytes)
@@ -209,7 +261,12 @@ def fetch_corpus(ti) -> str:
 
 @task
 def fetch_schedule(ti) -> str:
-    """Download CIF full daily schedule from NROD → temp file."""
+    """Download CIF full daily schedule from NROD → temp file.
+
+    The full timetable (CIF_ALL_FULL_DAILY) is ~130MB compressed and contains
+    every active schedule across all UK train operators, in the JsonTimetableV1
+    JSON Lines format. One JSON object per line, one line per schedule.
+    """
     logger.info("Fetching CIF full schedule from NROD")
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
@@ -225,6 +282,8 @@ def fetch_schedule(ti) -> str:
         username, password = _nrod_auth()
         with otel_task_tracer.start_child_span(span_name="rail.fetch.schedule") as fetch_span:
             fetch_span.set_attribute("http.url", CIF_URL)
+            # stream=True is essential: the file is ~130MB so we must not buffer
+            # the entire response in memory before writing to disk.
             resp = requests.get(CIF_URL, auth=(username, password), stream=True, timeout=600)
             resp.raise_for_status()
 
@@ -252,18 +311,34 @@ def fetch_schedule(ti) -> str:
 
 @task
 def parse_corpus(corpus_path: str) -> dict[str, Any]:
-    """Parse CORPUS JSON and upsert into rail_locations. Returns summary dict."""
+    """Parse CORPUS JSON and upsert into rail_locations.
+
+    CORPUS is a single large JSON document (not line-delimited). The key array
+    is TIPLOCDATA — a flat list of location objects. We upsert rather than
+    replace so that any locations referenced by existing schedule data are
+    never left without a name, even if NROD temporarily omits them.
+
+    Returns a summary dict that downstream tasks use to report coverage stats.
+    """
     logger.info("Parsing CORPUS from %s", corpus_path)
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
     with instrument_task_context({"nrod.feed": "CORPUS"}) as span:
         meter = get_meter("rail.parse")
+        # A Counter accumulates across the lifetime of the process. It is the
+        # right instrument here because "records parsed" only ever increases —
+        # we never unparsed a location record. Counters are ideal for rate
+        # calculations (records/second) in your metrics backend.
         parsed_counter = meter.create_counter(
             "rail.corpus.locations_parsed",
             unit="1",
             description="Number of CORPUS location records parsed",
         )
 
+        # Separate child spans for decode vs. upsert mean you can see in a trace
+        # exactly how long JSON parsing took versus database round-trips. Without
+        # this split, a slow database would be indistinguishable from a slow
+        # parse in the single task span.
         with otel_task_tracer.start_child_span(span_name="rail.parse.corpus") as parse_span:
             with gzip.open(corpus_path, "rt", encoding="utf-8") as f:
                 data = json.load(f)
@@ -271,6 +346,9 @@ def parse_corpus(corpus_path: str) -> dict[str, Any]:
             records = data.get("TIPLOCDATA", [])
             total = len(records)
             with_crs = sum(1 for r in records if r.get("3ALPHA", "").strip())
+            # Set these as span attributes (not just log lines) so that an
+            # observability tool can alert if total drops unexpectedly — e.g.
+            # if NROD returns a truncated file.
             parse_span.set_attribute("corpus.total_records", total)
             parse_span.set_attribute("corpus.with_crs", with_crs)
             logger.info("CORPUS: %d records, %d with CRS code", total, with_crs)
@@ -285,7 +363,12 @@ def parse_corpus(corpus_path: str) -> dict[str, Any]:
                     if not tiploc:
                         continue
                     def _s(val) -> str | None:
-                        """Coerce a CORPUS field to a stripped string, or None if empty."""
+                        """Coerce a CORPUS field to a stripped string, or None if empty.
+
+                        CORPUS JSON mixes string and integer types for fields like STANOX
+                        and NLC. Calling .strip() directly on an int raises AttributeError,
+                        so we coerce to str first.
+                        """
                         return str(val).strip() or None if val is not None else None
 
                     rows.append((
@@ -321,16 +404,38 @@ def parse_corpus(corpus_path: str) -> dict[str, Any]:
 
 @task
 def parse_schedule(schedule_path: str) -> dict[str, Any]:
+    """Stream-parse the CIF timetable and insert into rail_schedules + rail_schedule_stops.
+
+    NROD's full CIF file is in JsonTimetableV1 format: one JSON object per line.
+    Each line can be one of several record types:
+      - JsonTimetableV1  — file header (first line)
+      - TiplocV1         — TIPLOC reference records (we skip; CORPUS is more complete)
+      - JsonScheduleV1   — a single train schedule with all its stops (the main data)
+      - JsonAssociationV1 — train association rules (we skip)
+
+    We do a full DELETE + re-insert for the current run_date so the table always
+    reflects the state of the timetable as downloaded today, with no stale rows
+    from a previous run of the same date.
+
+    Returns a summary dict including the sorted list of TOC IDs found, which
+    extract_toc_list passes on to analyse_by_toc.
     """
-    Stream-parse CIF full schedule and insert into rail_schedules + rail_schedule_stops.
-    Returns a summary dict including the list of TOC IDs found.
-    """
+    # get_current_context() is Airflow 3's way of accessing the DAG run context
+    # from inside a task function without passing it as an argument. We use ds
+    # (the logical date as YYYY-MM-DD) as the partition key for all DB writes,
+    # so that each daily run produces an independent, replaceable snapshot.
     run_date: str = get_current_context()["ds"]
     logger.info("Parsing CIF schedule from %s (run_date=%s)", schedule_path, run_date)
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
+    # Tagging the root span with both the feed name and run_date means you can
+    # filter traces in your observability tool by either dimension — useful when
+    # multiple daily runs overlap or when comparing across days.
     with instrument_task_context({"nrod.feed": "CIF_FULL", "run_date": run_date}) as span:
         meter = get_meter("rail.parse")
+        # Counter is correct here: each call to schedule_counter.add(1) represents
+        # one more record processed. Over a long-running parse you can plot this as
+        # a rate to detect if parsing has stalled or slowed unexpectedly.
         schedule_counter = meter.create_counter(
             "rail.schedule.records_parsed",
             unit="1",
@@ -341,19 +446,24 @@ def parse_schedule(schedule_path: str) -> dict[str, Any]:
         with hook.get_conn() as conn:
             _ensure_schema(conn)
 
-            # Clear existing schedules for this run_date (full reload)
+            # Delete first so that if the download produced a different set of
+            # schedules (e.g. an operator added or removed services), the DB
+            # reflects the new state rather than merging old and new rows.
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM rail_schedules WHERE run_date = %s", (run_date,))
                 deleted = cur.rowcount
             conn.commit()
             logger.info("Cleared %d existing schedules for %s", deleted, run_date)
 
-            # Stream-parse the JSON Lines CIF file (JsonTimetableV1 format)
             schedule_count = 0
             stop_count = 0
             tocs_seen: set[str] = set()
             status_counts: dict[str, int] = {}
 
+            # One child span covers the entire streaming parse. The span attributes
+            # set at the end (lines_read, schedules_parsed, etc.) give you a
+            # quick summary without having to grep through logs. A sudden drop in
+            # schedules_parsed is a good candidate for a metric alert.
             with otel_task_tracer.start_child_span(span_name="rail.parse.schedule.stream") as stream_span:
                 with conn.cursor() as cur:
                     with gzip.open(schedule_path, "rt", encoding="utf-8") as f:
@@ -368,11 +478,15 @@ def parse_schedule(schedule_path: str) -> dict[str, Any]:
                             except json.JSONDecodeError:
                                 continue
 
+                            # Each line has a single top-level key identifying its type.
+                            # We only care about JsonScheduleV1; all other types are skipped.
                             sched = obj.get("JsonScheduleV1")
                             if not sched:
                                 continue
 
-                            # Skip delete records
+                            # The full timetable file contains "Create" records for all
+                            # active schedules. "Delete" records appear in delta files.
+                            # We skip deletes because we rebuilt the table from scratch above.
                             if sched.get("transaction_type") == "Delete":
                                 continue
 
@@ -415,12 +529,21 @@ def parse_schedule(schedule_path: str) -> dict[str, Any]:
                             status_counts[status or "?"] = status_counts.get(status or "?", 0) + 1
                             schedule_counter.add(1, {"record_type": "JsonScheduleV1"})
 
+                            # Each schedule's stops are nested inside schedule_location.
+                            # LO = origin, LI = intermediate, LT = terminus.
+                            # We insert them in the same transaction as the parent
+                            # schedule so a partial failure leaves no orphaned stops.
                             if schedule_id:
                                 stops = []
                                 for seq, loc in enumerate(seg.get("schedule_location", [])):
                                     loc_type = loc.get("location_type") or loc.get("record_identity")
                                     if loc_type not in ("LO", "LI", "LT"):
                                         continue
+                                    # The JSON format provides both raw times (e.g. "1312H"
+                                    # for 13:12:30) and public times (e.g. "1312"). We prefer
+                                    # the public time since it matches what passengers see;
+                                    # fall back to the raw time for passing movements (LI with
+                                    # no public stop).
                                     stops.append((
                                         loc_type,
                                         loc.get("tiploc_code", "").strip(),
@@ -429,7 +552,7 @@ def parse_schedule(schedule_path: str) -> dict[str, Any]:
                                         loc.get("departure") or loc.get("public_departure"),
                                         loc.get("pass"),
                                         loc.get("platform"),
-                                        None,  # activity not in JSON format
+                                        None,  # activity codes not present in JSON format
                                     ))
                                 if stops:
                                     cur.executemany("""
@@ -440,11 +563,19 @@ def parse_schedule(schedule_path: str) -> dict[str, Any]:
                                     """, [(schedule_id, *s) for s in stops])
                                     stop_count += len(stops)
 
+                            # Commit every INSERT_BATCH schedules to bound transaction size.
+                            # This means a crash mid-parse loses at most INSERT_BATCH rows,
+                            # not the entire run.
                             if schedule_count % INSERT_BATCH == 0:
                                 conn.commit()
                                 logger.info("Parsed %d schedules so far...", schedule_count)
 
                     conn.commit()
+                    # These span attributes are the first thing you see when you click on
+                    # this span in a trace. Having lines_read alongside schedules_parsed
+                    # immediately tells you whether a zero-schedule result means "empty
+                    # file" (lines_read ≈ 0) or "parse failed silently" (lines_read large,
+                    # schedules_parsed = 0).
                     stream_span.set_attribute("cif.lines_read", lines_read)
                     stream_span.set_attribute("cif.schedules_parsed", schedule_count)
                     stream_span.set_attribute("cif.stops_parsed", stop_count)
@@ -454,6 +585,9 @@ def parse_schedule(schedule_path: str) -> dict[str, Any]:
                         schedule_count, stop_count, len(tocs_seen)
                     )
 
+        # Duplicate the key counts onto the root span as well. The root span is
+        # what shows up in the DAG-level service graph, so having totals here
+        # means you can see schedule volume without drilling into child spans.
         span.set_attribute("cif.schedule_count", schedule_count)
         span.set_attribute("cif.toc_count", len(tocs_seen))
 
@@ -473,7 +607,17 @@ def parse_schedule(schedule_path: str) -> dict[str, Any]:
 
 @task
 def extract_toc_list(parse_result: dict[str, Any]) -> list[str]:
-    """Pass through the TOC list from parse_schedule for use in analyse_by_toc."""
+    """Pass through the TOC list from parse_schedule for use in analyse_by_toc.
+
+    This is a lightweight fan-out node: its sole purpose in the task graph is
+    to give analyse_by_toc a separate upstream dependency from parse_schedule,
+    so the two parse tasks (corpus and schedule) can run in parallel while
+    still ensuring analyse_by_toc waits for the schedule parse to complete.
+
+    The OTel span here is intentionally minimal — the interesting work happened
+    in parse_schedule. We record just the TOC count and the full list so that
+    traces show which operators were active on any given run.
+    """
     tocs = parse_result["toc_list"]
     logger.info("Active TOCs this run: %s", tocs)
 
@@ -481,6 +625,9 @@ def extract_toc_list(parse_result: dict[str, Any]) -> list[str]:
     with instrument_task_context({"stage": "extract_toc_list"}) as span:
         span.set_attribute("toc.count", len(tocs))
         with otel_task_tracer.start_child_span(span_name="rail.extract.toc_list") as s:
+            # Storing the full comma-separated list as a span attribute lets you
+            # search traces by operator code — useful for debugging missing data
+            # for a specific TOC.
             s.set_attribute("toc.list", ",".join(tocs))
     return tocs
 
@@ -491,9 +638,12 @@ def extract_toc_list(parse_result: dict[str, Any]) -> list[str]:
 
 @task
 def analyse_by_toc(toc_list: list[str], parse_result: dict[str, Any]) -> dict[str, Any]:
-    """
-    For each TOC: count services, distinct route O/D pairs, distinct stations.
-    Writes to rail_toc_metrics.
+    """For each TOC: count services, distinct route O/D pairs, and distinct stations.
+
+    Runs three SQL queries per operator and writes the results to rail_toc_metrics.
+    The fan-out into one child span per TOC means that in a trace you can see
+    exactly how long each operator's analysis took — useful for identifying which
+    TOC has an unusually large schedule that slows the whole task down.
     """
     run_date = parse_result["run_date"]
     logger.info("Analysing %d TOCs for %s", len(toc_list), run_date)
@@ -501,6 +651,10 @@ def analyse_by_toc(toc_list: list[str], parse_result: dict[str, Any]) -> dict[st
 
     with instrument_task_context({"stage": "analyse_by_toc", "run_date": run_date}) as span:
         meter = get_meter("rail.analysis")
+        # A Gauge is appropriate here: we want to know the current service count
+        # for each TOC, not a cumulative total. The "toc" dimension on the gauge
+        # means your metrics backend can show a per-operator breakdown without
+        # needing to query the database directly.
         toc_gauge = meter.create_gauge(
             "rail.analysis.toc_services",
             unit="1",
@@ -515,22 +669,29 @@ def analyse_by_toc(toc_list: list[str], parse_result: dict[str, Any]) -> dict[st
                 )
 
             results = {}
+            # Parent span covers the full TOC loop. Child spans per TOC let the
+            # trace waterfall show parallelism (or lack thereof) across operators.
             with otel_task_tracer.start_child_span(span_name="rail.analyse.by_toc") as parent:
                 parent.set_attribute("toc.count", len(toc_list))
 
                 for toc in toc_list:
+                    # One child span per TOC: named rail.analyse.toc.<code> so that
+                    # in a service map or trace search you can immediately see which
+                    # operator's data is in scope for any given span.
                     with otel_task_tracer.start_child_span(
                         span_name=f"rail.analyse.toc.{toc}"
                     ) as toc_span:
                         with conn.cursor() as cur:
-                            # Service count
+                            # Service count: how many scheduled trains does this TOC run?
                             cur.execute("""
                                 SELECT COUNT(*) FROM rail_schedules
                                 WHERE run_date = %s AND toc_id = %s
                             """, (run_date, toc))
                             service_count = cur.fetchone()[0]
 
-                            # Route count (distinct origin→destination pairs)
+                            # Route count: distinct origin→destination pairs. Joining on
+                            # LO (origin) and LT (terminus) gives the end-to-end route,
+                            # independent of intermediate stops.
                             cur.execute("""
                                 SELECT COUNT(*) FROM (
                                     SELECT DISTINCT lo.tiploc AS origin, lt.tiploc AS dest
@@ -542,7 +703,8 @@ def analyse_by_toc(toc_list: list[str], parse_result: dict[str, Any]) -> dict[st
                             """, (run_date, toc))
                             route_count = cur.fetchone()[0]
 
-                            # Station count (distinct tiplocs called at)
+                            # Station count: how many distinct locations does this TOC serve?
+                            # Includes all stop types (origin, intermediate, terminus).
                             cur.execute("""
                                 SELECT COUNT(DISTINCT ss.tiploc)
                                 FROM rail_schedules s
@@ -561,6 +723,10 @@ def analyse_by_toc(toc_list: list[str], parse_result: dict[str, Any]) -> dict[st
                                     station_count = EXCLUDED.station_count
                             """, (run_date, toc, service_count, route_count, station_count))
 
+                        # Span attributes and gauge both record the same service_count,
+                        # but for different purposes: the span attribute is queryable in
+                        # traces (find all spans where toc.service_count > 500), while
+                        # the gauge feeds time-series dashboards showing trends over days.
                         toc_span.set_attribute("toc.id", toc)
                         toc_span.set_attribute("toc.service_count", service_count)
                         toc_span.set_attribute("toc.route_count", route_count)
@@ -581,6 +747,8 @@ def analyse_by_toc(toc_list: list[str], parse_result: dict[str, Any]) -> dict[st
 
         span.set_attribute("tocs.analysed", len(results))
         total_services = sum(v["services"] for v in results.values())
+        # Total services on the root span gives the service-map view a single
+        # number to show for this task without needing to inspect child spans.
         span.set_attribute("total.services", total_services)
 
     return {"toc_metrics": results, "run_date": run_date}
@@ -591,9 +759,12 @@ def analyse_by_route(
     corpus_result: dict[str, Any],
     parse_result: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    For each origin→destination pair: count daily frequency and number of TOCs.
-    Writes to rail_route_metrics.
+    """For each origin→destination pair: count daily frequency and number of TOCs.
+
+    Runs a single aggregating SQL query (more efficient than per-route loops),
+    then enriches each result row with human-readable names from rail_locations.
+    The enrichment loop is wrapped in its own child span so you can see in traces
+    whether DB lookups or the aggregation query are the bottleneck.
     """
     run_date = parse_result["run_date"]
     logger.info("Analysing routes for %s", run_date)
@@ -601,6 +772,9 @@ def analyse_by_route(
 
     with instrument_task_context({"stage": "analyse_by_route", "run_date": run_date}) as span:
         meter = get_meter("rail.analysis")
+        # route_density gauge tracks the busiest single route. A sudden drop in
+        # the top route frequency (e.g. a major route suspended) would be visible
+        # as an anomaly in a time-series chart of this gauge.
         route_gauge = meter.create_gauge(
             "rail.analysis.route_density",
             unit="1",
@@ -616,6 +790,9 @@ def analyse_by_route(
 
             with otel_task_tracer.start_child_span(span_name="rail.analyse.by_route") as route_span:
                 with conn.cursor() as cur:
+                    # Single aggregation query: join schedules to their origin (LO) and
+                    # terminus (LT) stops to get the end-to-end route, then count how
+                    # many times each pair runs and how many distinct TOCs serve it.
                     cur.execute("""
                         SELECT
                             lo.tiploc       AS origin,
@@ -636,7 +813,8 @@ def analyse_by_route(
                 route_span.set_attribute("route.pair_count", len(rows))
                 logger.info("Found %d distinct route pairs", len(rows))
 
-                # Enrich with CRS codes + names from rail_locations
+                # Separate child span for the enrichment phase so the trace shows
+                # the cost of N individual DB lookups vs. the aggregation query.
                 with otel_task_tracer.start_child_span(span_name="rail.analyse.by_route.enrich") as enrich_span:
                     with conn.cursor() as cur:
                         batch = []
@@ -692,6 +870,9 @@ def analyse_by_route(
 
                     conn.commit()
                     enrich_span.set_attribute("route.rows_inserted", len(rows))
+                    # top_frequency on the enrich span + gauge gives two ways to
+                    # surface the busiest route: query it in traces, or chart it
+                    # over time in a metrics dashboard.
                     enrich_span.set_attribute("route.top_frequency", top_freq)
                     route_gauge.set(top_freq, {"label": "top_pair"})
 
@@ -705,9 +886,11 @@ def analyse_by_station(
     corpus_result: dict[str, Any],
     parse_result: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    For each station (tiploc): count total calls, distinct TOCs, times as terminus.
-    Writes to rail_station_metrics.
+    """For each station: count total calls, distinct TOCs, and times as terminus.
+
+    Uses two SQL queries (calls + terminus counts) rather than one so that the
+    terminus_count can use a simpler GROUP BY without a CASE expression. The
+    results are then joined in Python and batch-inserted with location enrichment.
     """
     run_date = parse_result["run_date"]
     logger.info("Analysing stations for %s", run_date)
@@ -715,6 +898,9 @@ def analyse_by_station(
 
     with instrument_task_context({"stage": "analyse_by_station", "run_date": run_date}) as span:
         meter = get_meter("rail.analysis")
+        # Tracking the busiest station's call count over time is a useful health
+        # indicator: a major hub like London Waterloo dropping from ~2000 to ~200
+        # calls would indicate a parsing or data problem worth investigating.
         station_gauge = meter.create_gauge(
             "rail.analysis.station_calls",
             unit="1",
@@ -730,7 +916,9 @@ def analyse_by_station(
 
             with otel_task_tracer.start_child_span(span_name="rail.analyse.by_station") as station_span:
                 with conn.cursor() as cur:
-                    # Total calls + distinct TOCs per tiploc
+                    # All stop types (LO, LI, LT) count as a "call" at a station.
+                    # Counting DISTINCT toc_id per tiploc shows how many operators
+                    # serve each location — an indicator of interchange quality.
                     cur.execute("""
                         SELECT
                             ss.tiploc,
@@ -745,7 +933,9 @@ def analyse_by_station(
                     """, (run_date,))
                     call_rows = cur.fetchall()
 
-                    # Terminus counts (LT stop_type = train terminates here)
+                    # Terminus count is separate: a station that many trains terminate
+                    # at is likely a major hub or turnaround point, distinct from a
+                    # station that is simply called at frequently as an intermediate stop.
                     cur.execute("""
                         SELECT ss.tiploc, COUNT(*) AS terminus_count
                         FROM rail_schedule_stops ss
@@ -760,7 +950,6 @@ def analyse_by_station(
                 top_station_calls = call_rows[0][1] if call_rows else 0
                 station_gauge.set(top_station_calls, {"label": "busiest"})
 
-                # Enrich with CRS / name from rail_locations and batch-insert
                 with otel_task_tracer.start_child_span(
                     span_name="rail.analyse.by_station.enrich"
                 ) as enrich_span:
@@ -824,7 +1013,17 @@ def aggregate_metrics(
     parse_result: dict[str, Any],
     corpus_result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Roll up totals from all three analysis tasks into a single summary."""
+    """Roll up totals from all three analysis tasks into a single summary dict.
+
+    This is the fan-in point of the DAG: it waits for analyse_by_toc,
+    analyse_by_route, and analyse_by_station to all complete, then assembles
+    one dict that store_results and llm_summary can both consume without
+    independently querying the database.
+
+    The OTel span here deliberately records all summary values as attributes
+    so that the top-level DAG trace carries the headline numbers — you can see
+    total services, routes, and stations without opening a single task log.
+    """
     run_date = parse_result["run_date"]
 
     summary = {
@@ -849,7 +1048,14 @@ def aggregate_metrics(
 
 @task
 def store_results(summary: dict[str, Any]) -> None:
-    """Upsert the run summary into rail_run_metrics."""
+    """Upsert the run summary into rail_run_metrics.
+
+    rail_run_metrics is the single-row-per-day top-level summary table. It is
+    the first place to look when checking whether a run completed and what it
+    produced. The completed_at timestamp is updated on every upsert, so
+    re-running the same date overwrites with fresh numbers rather than
+    accumulating duplicates.
+    """
     run_date = summary["run_date"]
     logger.info("Storing run metrics for %s", run_date)
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
@@ -893,7 +1099,24 @@ def store_results(summary: dict[str, Any]) -> None:
 
 @task
 def llm_summary(summary: dict[str, Any], toc_result: dict[str, Any]) -> None:
-    """Ask the LLM to narrate the day's rail network metrics and log the result."""
+    """Ask the LLM to write a plain-English narrative of the day's rail network data.
+
+    This task demonstrates combining OpenLLMetry (LLM observability) with the
+    airflow-otel instrumentation pattern. instrument_llm() activates the
+    opentelemetry-instrumentation-openai-v2 package, which intercepts every
+    OpenAI SDK call and emits spans containing:
+      - The model name and version
+      - Prompt and completion token counts
+      - Total latency broken down into time-to-first-token and generation time
+      - Finish reason (stop / length / error)
+
+    These spans appear as children of the llm.summarise_network span in your
+    trace waterfall, giving full visibility into the LLM call without any
+    manual attribute-setting on the response object.
+
+    The narrative is written to the task log with clear separator lines so it
+    is easy to find when reviewing an Airflow task run.
+    """
     run_date = summary["run_date"]
     logger.info("=" * 80)
     logger.info("Generating LLM narrative summary for %s", run_date)
@@ -920,9 +1143,16 @@ def llm_summary(summary: dict[str, Any], toc_result: dict[str, Any]) -> None:
         f"and anything noteworthy. Be factual and concise."
     )
 
+    # instrument_task_context creates the root span. instrument_requests() and
+    # instrument_llm() are called inside the context so that the auto-instrumented
+    # spans they produce are children of this root span rather than top-level orphans.
     with instrument_task_context({"stage": "llm_summary", "run_date": run_date}) as span:
         instrument_requests()
         instrument_llm()
+        # Our manual child span wraps the LLM call. OpenLLMetry adds its own
+        # child spans inside this one, giving a two-level hierarchy:
+        #   llm.summarise_network (our span, with run_date / toc.count)
+        #     └─ openai.chat (OpenLLMetry span, with token counts / latency)
         with otel_task_tracer.start_child_span(span_name="llm.summarise_network") as llm_span:
             llm_span.set_attribute("run_date", run_date)
             llm_span.set_attribute("toc.count", summary["tocs_active"])
@@ -934,6 +1164,8 @@ def llm_summary(summary: dict[str, Any], toc_result: dict[str, Any]) -> None:
             )
 
             narrative = (response.choices[0].message.content or "").strip()
+            # summary.length as a span attribute lets you alert if the LLM returns
+            # an unexpectedly short response (e.g. truncated due to token limits).
             llm_span.set_attribute("summary.length", len(narrative))
 
     logger.info("=" * 80)
@@ -949,27 +1181,37 @@ def llm_summary(summary: dict[str, Any], toc_result: dict[str, Any]) -> None:
 
 @dag(
     schedule=timedelta(days=1),
+    # start_date must be in the past so that manual triggers get a logical_date
+    # that satisfies task.start_date <= logical_date. If start_date is in the
+    # future, Airflow filters out all tasks and the run completes instantly with
+    # zero task instances — a silent no-op that is hard to diagnose.
     start_date=pendulum.datetime(2026, 3, 21, tz="UTC"),
     catchup=False,
 )
 def rail_network_analysis():
-    # Parallel fetches
+    # fetch_corpus and fetch_schedule have no dependencies on each other, so
+    # Airflow schedules them in parallel. This halves the wall-clock time spent
+    # waiting on NROD's servers compared to a sequential fetch.
     corpus_path = fetch_corpus()
     schedule_path = fetch_schedule()
 
-    # Parse
+    # parse tasks each depend on exactly one fetch result, maintaining the
+    # parallelism through the parse phase.
     corpus_result = parse_corpus(corpus_path)
     parse_result = parse_schedule(schedule_path)
 
-    # Extract TOC list from parse result
+    # extract_toc_list is a lightweight pass-through that gives analyse_by_toc
+    # a clean single-type input (list[str]) rather than the full parse_result dict.
     toc_list = extract_toc_list(parse_result)
 
-    # Fan-out: three independent analysis tasks
+    # Fan-out: all three analysis tasks can run in parallel since they each
+    # only read from the DB (which was populated by the parse tasks).
     toc_result = analyse_by_toc(toc_list, parse_result)
     route_result = analyse_by_route(corpus_result, parse_result)
     station_result = analyse_by_station(corpus_result, parse_result)
 
-    # Fan-in: aggregate, store, then narrate
+    # Fan-in: aggregate waits for all three analyses, then store and narrate
+    # sequentially so the LLM always summarises fully-committed data.
     summary = aggregate_metrics(toc_result, route_result, station_result, parse_result, corpus_result)
     store_results(summary) >> llm_summary(summary, toc_result)
 
