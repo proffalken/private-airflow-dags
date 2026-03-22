@@ -36,7 +36,7 @@ import pendulum
 import requests
 
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.sdk import chain, dag, task, Variable
+from airflow.sdk import chain, dag, get_current_context, task, Variable
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
@@ -321,11 +321,12 @@ def _parse_cif_time(raw: str) -> str | None:
 
 
 @task
-def parse_schedule(schedule_path: str, run_date: str) -> dict[str, Any]:
+def parse_schedule(schedule_path: str) -> dict[str, Any]:
     """
     Stream-parse CIF full schedule and insert into rail_schedules + rail_schedule_stops.
     Returns a summary dict including the list of TOC IDs found.
     """
+    run_date: str = get_current_context()["ds"]
     logger.info("Parsing CIF schedule from %s (run_date=%s)", schedule_path, run_date)
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
@@ -960,15 +961,13 @@ def store_results(summary: dict[str, Any]) -> None:
     catchup=False,
 )
 def rail_network_analysis():
-    run_date = "{{ ds }}"  # Airflow logical date as YYYY-MM-DD string
-
     # Parallel fetches
     corpus_path = fetch_corpus()
     schedule_path = fetch_schedule()
 
     # Parse
     corpus_result = parse_corpus(corpus_path)
-    parse_result = parse_schedule(schedule_path, run_date)
+    parse_result = parse_schedule(schedule_path)
 
     # Extract TOC list from parse result
     toc_list = extract_toc_list(parse_result)
