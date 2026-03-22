@@ -284,12 +284,16 @@ def parse_corpus(corpus_path: str) -> dict[str, Any]:
                     tiploc = rec.get("TIPLOC", "").strip()
                     if not tiploc:
                         continue
+                    def _s(val) -> str | None:
+                        """Coerce a CORPUS field to a stripped string, or None if empty."""
+                        return str(val).strip() or None if val is not None else None
+
                     rows.append((
                         tiploc,
-                        rec.get("3ALPHA", "").strip() or None,
-                        (rec.get("NLCDESC16") or rec.get("NLCDESC") or "").strip() or None,
-                        rec.get("STANOX", "").strip() or None,
-                        rec.get("NLC", "").strip() or None,
+                        _s(rec.get("3ALPHA")),
+                        _s(rec.get("NLCDESC16") or rec.get("NLCDESC")),
+                        _s(rec.get("STANOX")),
+                        _s(rec.get("NLC")),
                     ))
 
                 with conn.cursor() as cur:
