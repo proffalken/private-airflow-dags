@@ -961,7 +961,7 @@ def store_results(summary: dict[str, Any]) -> None:
 
 @dag(
     schedule=timedelta(days=1),
-    start_date=pendulum.datetime(2026, 3, 22, 4, 0, tz="UTC"),
+    start_date=pendulum.datetime(2026, 3, 21, tz="UTC"),
     catchup=False,
 )
 def rail_network_analysis():
