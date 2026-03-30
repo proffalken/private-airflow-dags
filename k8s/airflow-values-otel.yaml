@@ -13,12 +13,21 @@ env:
     value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"
 
 workers:
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "1536Mi"
   env:
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
       value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"
-  envFrom:
-    - secretRef:
-        name: garage-s3-credentials
+    - name: AIRFLOW_CONN_GARAGE_S3
+      valueFrom:
+        secretKeyRef:
+          name: garage-s3-credentials
+          key: AIRFLOW_CONN_GARAGE_S3
 
 triggerer:
   env:

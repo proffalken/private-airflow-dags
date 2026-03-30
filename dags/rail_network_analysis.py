@@ -1229,7 +1229,8 @@ def llm_summary(summary: dict[str, Any], toc_result: dict[str, Any]) -> None:
     logger.info("=" * 80)
     logger.info("NETWORK SUMMARY — %s", run_date)
     logger.info("=" * 80)
-    logger.info(narrative)
+    for line in narrative.splitlines():
+        logger.info(line)
     logger.info("=" * 80)
 
 
