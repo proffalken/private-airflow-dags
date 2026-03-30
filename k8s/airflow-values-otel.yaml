@@ -16,7 +16,7 @@ workers:
   env:
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
       value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"
-  envFrom:
+  extraEnvFrom: |
     - secretRef:
         name: garage-s3-credentials
 
