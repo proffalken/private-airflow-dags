@@ -238,13 +238,12 @@ class TestS3Key:
 # ---------------------------------------------------------------------------
 
 class TestTrustConsumer:
-    def _make_consumer(self, flush_interval: int = 3600):
+    def _make_consumer(self):
         s3 = MagicMock()
         consumer = c.TrustConsumer(
             s3_client=s3,
             bucket="test-bucket",
             prefix="trust-movements",
-            flush_interval=flush_interval,
         )
         return consumer, s3
 
@@ -295,10 +294,14 @@ class TestTrustConsumer:
         consumer.flush(force=True)
         s3.put_object.assert_not_called()
 
-    def test_flush_noop_before_interval_elapses(self):
-        consumer, s3 = self._make_consumer(flush_interval=9999)
+    def test_flush_noop_within_same_hour(self):
+        """flush() without force=True is a no-op when the hour hasn't changed."""
+        consumer, s3 = self._make_consumer()
         consumer.on_message(self._make_frame(MOVEMENT_MSG))
-        consumer.flush(force=False)
+        # datetime.now returns the same hour as _buffer_hour → no flush
+        with patch("consumer.datetime") as mock_dt:
+            mock_dt.now.return_value = consumer._buffer_hour.replace(minute=30)
+            consumer.flush(force=False)
         s3.put_object.assert_not_called()
         assert len(consumer._buffer) == 1
 

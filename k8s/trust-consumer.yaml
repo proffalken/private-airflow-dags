@@ -71,8 +71,6 @@ spec:
                 secretKeyRef:
                   name: trust-consumer-secret
                   key: AWS_SECRET_ACCESS_KEY
-            - name: FLUSH_INTERVAL_SECS
-              value: "3600"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4317"
             - name: OTEL_SERVICE_NAME
