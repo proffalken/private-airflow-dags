@@ -60,16 +60,16 @@ spec:
             - name: S3_PREFIX
               value: "trust-movements"
             - name: S3_ENDPOINT_URL
-              value: "http://garage.garage.svc.cluster.local:3900"
+              value: "http://garage.default.svc.cluster.local:3900"
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: garage-s3-credentials
+                  name: trust-consumer-secret
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: garage-s3-credentials
+                  name: trust-consumer-secret
                   key: AWS_SECRET_ACCESS_KEY
             - name: FLUSH_INTERVAL_SECS
               value: "3600"

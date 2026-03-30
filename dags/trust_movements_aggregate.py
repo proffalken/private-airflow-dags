@@ -18,6 +18,8 @@ import pendulum
 
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import chain, dag, get_current_context, task
+from airflow.traces import otel_tracer
+from airflow.traces.tracer import Trace
 from airflow_otel import instrument_task_context, get_meter
 
 logger = logging.getLogger("airflow.trust_movements_aggregate")
@@ -212,22 +214,26 @@ def trust_movements_aggregate():
 
     @task
     def ensure_summary_schema() -> None:
+        otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
         with instrument_task_context({"nrod.feed": "TRUST", "task": "ensure_summary_schema"}):
             pg = PostgresHook(postgres_conn_id="rail_network_db")
             conn = pg.get_conn()
-            with conn.cursor() as cur:
-                for stmt in SUMMARY_SCHEMA_SQL.split(";"):
-                    s = stmt.strip()
-                    if s:
-                        cur.execute(s)
-            conn.commit()
-            conn.close()
+            with otel_task_tracer.start_child_span(span_name="trust.ensure_summary_schema") as span:
+                span.set_attribute("nrod.feed", "TRUST")
+                with conn.cursor() as cur:
+                    for stmt in SUMMARY_SCHEMA_SQL.split(";"):
+                        s = stmt.strip()
+                        if s:
+                            cur.execute(s)
+                conn.commit()
+                conn.close()
 
     @task
     def compute_daily_aggregates() -> dict:
         """Aggregate yesterday's movements into trust_daily_summary."""
         ctx = get_current_context()
         yesterday: date = ctx["data_interval_start"].date()
+        otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
         with instrument_task_context({
             "nrod.feed": "TRUST",
@@ -235,14 +241,16 @@ def trust_movements_aggregate():
             "summary_date": str(yesterday),
         }):
             meter = get_meter("trust.aggregate")
-            toc_gauge = meter.create_gauge(
+            meter.create_gauge(
                 "trust.aggregate.tocs_summarised", unit="1",
                 description="Number of TOCs with data in latest summary run",
             )
 
             pg = PostgresHook(postgres_conn_id="rail_network_db")
             conn = pg.get_conn()
-            _compute_daily_summary(conn, yesterday)
+            with otel_task_tracer.start_child_span(span_name="trust.compute_daily_summary") as span:
+                span.set_attribute("trust.summary_date", str(yesterday))
+                _compute_daily_summary(conn, yesterday)
             conn.close()
 
             logger.info("Daily aggregate complete for %s", yesterday)
@@ -251,6 +259,7 @@ def trust_movements_aggregate():
     @task
     def enforce_retention() -> dict:
         """Drop monthly partitions older than RETENTION_DAYS."""
+        otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
         with instrument_task_context({
             "nrod.feed": "TRUST",
             "task": "enforce_retention",
@@ -258,7 +267,10 @@ def trust_movements_aggregate():
         }):
             pg = PostgresHook(postgres_conn_id="rail_network_db")
             conn = pg.get_conn()
-            dropped = _drop_old_partitions(conn, RETENTION_DAYS, today=date.today())
+            with otel_task_tracer.start_child_span(span_name="trust.enforce_retention") as span:
+                span.set_attribute("trust.retention_days", RETENTION_DAYS)
+                dropped = _drop_old_partitions(conn, RETENTION_DAYS, today=date.today())
+                span.set_attribute("trust.partitions_dropped", len(dropped))
             conn.close()
             logger.info("Dropped %d old partitions: %s", len(dropped), dropped)
             return {"dropped_partitions": dropped}
