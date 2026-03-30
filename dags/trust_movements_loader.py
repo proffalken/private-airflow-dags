@@ -30,6 +30,8 @@ import pendulum
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import chain, dag, get_current_context, task
+from airflow.traces import otel_tracer
+from airflow.traces.tracer import Trace
 from airflow_otel import instrument_task_context, get_meter
 
 logger = logging.getLogger("airflow.trust_movements_loader")
@@ -231,24 +233,27 @@ def trust_movements_loader():
     @task
     def ensure_schema() -> None:
         """Create the train_movements partitioned table and tracking table if absent."""
-        with instrument_task_context({"nrod.feed": "TRUST", "task": "ensure_schema"}):
+        otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
+        with instrument_task_context({"nrod.feed": "TRUST", "task": "ensure_schema"}) as span:
             pg = PostgresHook(postgres_conn_id="rail_network_db")
             conn = pg.get_conn()
-            with conn.cursor() as cur:
-                for stmt in SCHEMA_SQL.split(";"):
-                    s = stmt.strip()
-                    if s:
-                        cur.execute(s)
-            conn.commit()
-            conn.close()
+            with otel_task_tracer.start_child_span(span_name="trust.ensure_schema") as child:
+                child.set_attribute("nrod.feed", "TRUST")
+                with conn.cursor() as cur:
+                    for stmt in SCHEMA_SQL.split(";"):
+                        s = stmt.strip()
+                        if s:
+                            cur.execute(s)
+                conn.commit()
+                conn.close()
             logger.info("Schema verified")
 
     @task
     def load_hour() -> dict:
         """Load the previous hour's Parquet files from S3 into Postgres."""
         ctx = get_current_context()
-        # data_interval_start is the beginning of the window we should process
         interval_start: datetime = ctx["data_interval_start"]
+        otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
         with instrument_task_context({
             "nrod.feed": "TRUST",
@@ -285,24 +290,26 @@ def trust_movements_loader():
                     logger.info("Skipping already-loaded file: %s", key)
                     continue
 
-                obj = s3.get_object(Bucket=STAGING_BUCKET, Key=key)
-                parquet_bytes = obj["Body"].read()
+                with otel_task_tracer.start_child_span(span_name="trust.load_file") as file_span:
+                    file_span.set_attribute("s3.key", key)
+                    obj = s3.get_object(Bucket=STAGING_BUCKET, Key=key)
+                    parquet_bytes = obj["Body"].read()
 
-                row_count = _load_parquet_to_db(conn, parquet_bytes)
-                _mark_file_loaded(conn, key, row_count)
+                    row_count = _load_parquet_to_db(conn, parquet_bytes)
+                    _mark_file_loaded(conn, key, row_count)
 
-                # Move to processed/ prefix (copy + delete)
-                processed_key = f"processed/{key}"
-                s3.copy_object(
-                    Bucket=STAGING_BUCKET,
-                    CopySource={"Bucket": STAGING_BUCKET, "Key": key},
-                    Key=processed_key,
-                )
-                s3.delete_object(Bucket=STAGING_BUCKET, Key=key)
+                    processed_key = f"processed/{key}"
+                    s3.copy_object(
+                        Bucket=STAGING_BUCKET,
+                        CopySource={"Bucket": STAGING_BUCKET, "Key": key},
+                        Key=processed_key,
+                    )
+                    s3.delete_object(Bucket=STAGING_BUCKET, Key=key)
 
-                total_rows += row_count
-                total_files += 1
-                logger.info("Loaded %d rows from %s", row_count, key)
+                    file_span.set_attribute("trust.rows_loaded", row_count)
+                    total_rows += row_count
+                    total_files += 1
+                    logger.info("Loaded %d rows from %s", row_count, key)
 
             rows_counter.add(total_rows)
             files_counter.add(total_files)
