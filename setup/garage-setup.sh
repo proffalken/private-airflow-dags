@@ -30,9 +30,20 @@ if [[ -z "${GARAGE_VERSION:-}" ]]; then
         | grep '"tag_name"' | cut -d'"' -f4)
 fi
 
-echo "==> Installing Garage ${GARAGE_VERSION} (aarch64)"
+case "$(uname -m)" in
+    x86_64)  GARAGE_ARCH="x86_64-unknown-linux-musl" ;;
+    aarch64) GARAGE_ARCH="aarch64-unknown-linux-musl" ;;
+    armv7l)  GARAGE_ARCH="armv7-unknown-linux-musleabihf" ;;
+    armv6l)  GARAGE_ARCH="armv6l-unknown-linux-musleabihf" ;;
+    *)
+        echo "ERROR: unsupported architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+esac
+
+echo "==> Installing Garage ${GARAGE_VERSION} (${GARAGE_ARCH})"
 curl -fsSL \
-    "https://garagehq.deuxfleurs.fr/_releases/${GARAGE_VERSION}/aarch64-unknown-linux-musl/garage" \
+    "https://garagehq.deuxfleurs.fr/_releases/${GARAGE_VERSION}/${GARAGE_ARCH}/garage" \
     -o /usr/local/bin/garage
 chmod +x /usr/local/bin/garage
 
