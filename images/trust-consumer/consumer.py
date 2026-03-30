@@ -314,7 +314,7 @@ class TrustConsumer(stomp.ConnectionListener):
         logger.error("STOMP error: %s", frame.body)
 
     def on_disconnected(self) -> None:
-        logger.warning("STOMP disconnected — will attempt reconnect")
+        logger.warning("STOMP disconnected — main loop will reconnect")
 
     # -- Flush ---------------------------------------------------------------
 
@@ -398,15 +398,25 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
-    logger.info("Connecting to NROD STOMP at %s:%d", nrod_host, nrod_port)
-    conn.connect(username, password, wait=True)
-    conn.subscribe(destination="/topic/TRAIN_MVT_ALL_TOC", id=1, ack="auto")
-    logger.info("Subscribed to TRAIN_MVT_ALL_TOC — listening")
+    def _connect() -> None:
+        logger.info("Connecting to NROD STOMP at %s:%d", nrod_host, nrod_port)
+        conn.connect(username, password, wait=True)
+        conn.subscribe(destination="/topic/TRAIN_MVT_ALL_TOC", id=1, ack="auto")
+        logger.info("Subscribed to TRAIN_MVT_ALL_TOC — listening")
+
+    _connect()
 
     try:
         while True:
             time.sleep(30)
+            # Reconnect if the STOMP connection dropped
+            if not conn.is_connected():
+                logger.warning("STOMP connection lost — reconnecting")
+                _connect()
+            # Flush buffer if we've crossed an hour boundary
             listener.flush()
+            # Update liveness heartbeat file for k8s probe
+            open("/tmp/alive", "w").close()
     except Exception:
         logger.exception("Unexpected error in main loop")
         listener.flush(force=True)
