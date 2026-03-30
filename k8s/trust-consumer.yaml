@@ -1,0 +1,101 @@
+# TRUST STOMP Consumer Deployment
+#
+# Always-on service that subscribes to the Network Rail Open Data STOMP feed
+# and writes hourly Parquet snapshots to Garage S3.
+#
+# Prerequisites:
+#   - trust-consumer-secret must exist in the default namespace (see below)
+#   - garage-s3-credentials must exist (shared with Airflow workers)
+#   - The airflow-staging bucket must exist in Garage
+#
+# Create trust-consumer-secret:
+#   kubectl create secret generic trust-consumer-secret \
+#     --from-literal=NROD_USERNAME=<your-nrod-username> \
+#     --from-literal=NROD_PASSWORD=<your-nrod-password>
+#
+# Apply:
+#   kubectl apply -f k8s/trust-consumer.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trust-consumer
+  namespace: default
+  labels:
+    app: trust-consumer
+    component: rail-data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trust-consumer
+  strategy:
+    type: Recreate   # Only one consumer at a time — STOMP subscriptions are stateful
+  template:
+    metadata:
+      labels:
+        app: trust-consumer
+        component: rail-data
+      annotations:
+        # Dash0 / OTel auto-instrumentation
+        instrumentation.opentelemetry.io/inject-python: "true"
+    spec:
+      containers:
+        - name: trust-consumer
+          image: ghcr.io/proffalken/private-airflow-dags/trust-consumer:latest
+          imagePullPolicy: Always
+          env:
+            - name: NROD_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: trust-consumer-secret
+                  key: NROD_USERNAME
+            - name: NROD_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: trust-consumer-secret
+                  key: NROD_PASSWORD
+            - name: S3_BUCKET
+              value: "airflow-staging"
+            - name: S3_PREFIX
+              value: "trust-movements"
+            - name: S3_ENDPOINT_URL
+              value: "http://garage.garage.svc.cluster.local:3900"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: garage-s3-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: garage-s3-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: FLUSH_INTERVAL_SECS
+              value: "3600"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "trust-consumer"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import os, time
+                  f = '/tmp/alive'
+                  assert os.path.exists(f) and time.time() - os.path.getmtime(f) < 120
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            failureThreshold: 3
+      imagePullSecrets:
+        - name: ghcr-credentials
+      restartPolicy: Always
