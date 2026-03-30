@@ -22,6 +22,7 @@ secrets.values.yaml
 !.env.example
 k8s/garage-s3-secret.yaml
 k8s/garage-s3-secret.local.yaml
+k8s/trust-consumer-secret.yaml
 
 # Helm
 helm/charts/

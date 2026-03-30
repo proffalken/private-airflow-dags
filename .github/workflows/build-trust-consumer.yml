@@ -1,0 +1,83 @@
+name: Test and build trust-consumer image
+
+on:
+  pull_request:
+    paths:
+      - images/trust-consumer/**
+      - dags/trust_movements_loader.py
+      - dags/trust_movements_aggregate.py
+      - tests/test_trust_consumer.py
+      - tests/test_trust_loader.py
+      - pyproject.toml
+  push:
+    branches:
+      - main
+    paths:
+      - images/trust-consumer/**
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/proffalken/private-airflow-dags/trust-consumer
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install test dependencies
+        run: |
+          uv pip install --system \
+            pytest pytest-mock \
+            "pyarrow>=18.0" \
+            "stomp.py>=8.1" \
+            "boto3>=1.34" \
+            "opentelemetry-sdk>=1.28" \
+            "opentelemetry-exporter-otlp>=1.28" \
+            "opentelemetry-exporter-otlp-proto-grpc>=1.28"
+
+      - name: Run tests
+        run: pytest tests/test_trust_consumer.py tests/test_trust_loader.py -v
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: images/trust-consumer
+          file: images/trust-consumer/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
