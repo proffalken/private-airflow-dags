@@ -21,4 +21,4 @@ RUN pip install --no-cache-dir \
     "opentelemetry-semantic-conventions>=0.61b0" \
     opentelemetry-instrumentation-openai-v2 \
     opentelemetry-instrumentation-requests \
-    apache-airflow-providers-amazon
+    "apache-airflow-providers-amazon>=9.0.0"

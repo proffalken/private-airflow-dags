@@ -42,9 +42,23 @@ case "$(uname -m)" in
 esac
 
 echo "==> Installing Garage ${GARAGE_VERSION} (${GARAGE_ARCH})"
-curl -fsSL \
-    "https://garagehq.deuxfleurs.fr/_releases/${GARAGE_VERSION}/${GARAGE_ARCH}/garage" \
-    -o /usr/local/bin/garage
+GARAGE_URL="https://garagehq.deuxfleurs.fr/_releases/${GARAGE_VERSION}/${GARAGE_ARCH}/garage"
+curl -fsSL "${GARAGE_URL}" -o /usr/local/bin/garage
+
+if command -v sha256sum &>/dev/null; then
+    echo "==> Verifying checksum..."
+    EXPECTED=$(curl -fsSL \
+        "https://garagehq.deuxfleurs.fr/_releases/${GARAGE_VERSION}/SHA256SUMS" \
+        | grep "${GARAGE_ARCH}/garage" | awk '{print $1}')
+    ACTUAL=$(sha256sum /usr/local/bin/garage | awk '{print $1}')
+    if [[ "${EXPECTED}" != "${ACTUAL}" ]]; then
+        echo "ERROR: Checksum mismatch — binary may be corrupt or tampered with" >&2
+        rm -f /usr/local/bin/garage
+        exit 1
+    fi
+    echo "    Checksum OK"
+fi
+
 chmod +x /usr/local/bin/garage
 
 # ---------------------------------------------------------------------------
@@ -63,8 +77,7 @@ db_engine    = "sqlite"
 replication_factor = 1
 rpc_secret = "${RPC_SECRET}"
 
-[rpc_listen_addr]
-addr = "0.0.0.0:3901"
+rpc_bind_addr = "0.0.0.0:3901"
 
 [s3_api]
 s3_region    = "garage"
@@ -152,7 +165,10 @@ garage -c "${GARAGE_CONFIG}" bucket allow \
 # 7. Print credentials
 # ---------------------------------------------------------------------------
 
-PI_IP=$(hostname -I | awk '{print $1}')
+# Use PI_IP env var if set; otherwise use the first address from hostname -I.
+# On multi-homed hosts the first address may not be reachable from Kubernetes —
+# override with: PI_IP=192.168.x.x bash setup/garage-setup.sh
+PI_IP="${PI_IP:-$(hostname -I | awk '{print $1}')}"
 
 echo ""
 echo "========================================================"
