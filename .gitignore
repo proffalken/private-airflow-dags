@@ -20,6 +20,8 @@ secrets.values.yaml
 .env
 .env.*
 !.env.example
+k8s/garage-s3-secret.yaml
+k8s/garage-s3-secret.local.yaml
 
 # Helm
 helm/charts/
