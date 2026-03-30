@@ -27,6 +27,7 @@ for _mod in [
     "airflow.providers.amazon.aws.hooks", "airflow.providers.amazon.aws.hooks.s3",
     "airflow.providers.postgres", "airflow.providers.postgres.hooks",
     "airflow.providers.postgres.hooks.postgres",
+    "airflow.traces", "airflow.traces.tracer",
     "airflow_otel",
 ]:
     if _mod not in sys.modules:

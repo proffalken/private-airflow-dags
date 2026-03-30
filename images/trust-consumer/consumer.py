@@ -32,7 +32,7 @@ import logging
 import os
 import signal
 import sys
-import time
+import time  # still used in main loop sleep and HEALTHCHECK
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any
@@ -268,14 +268,16 @@ class TrustConsumer(stomp.ConnectionListener):
         s3_client,
         bucket: str,
         prefix: str,
-        flush_interval: int,
     ) -> None:
         self._s3 = s3_client
         self._bucket = bucket
         self._prefix = prefix
-        self._flush_interval = flush_interval
         self._buffer: list[dict] = []
-        self._last_flush = time.monotonic()
+        # Track the hour we started buffering so flushes always align to the
+        # hour boundary and the S3 key reflects the hour the data belongs to.
+        self._buffer_hour = datetime.now(tz=timezone.utc).replace(
+            minute=0, second=0, microsecond=0
+        )
         self._batch = 0
 
         # OTel instruments (None if OTel is not configured)
@@ -317,15 +319,21 @@ class TrustConsumer(stomp.ConnectionListener):
     # -- Flush ---------------------------------------------------------------
 
     def flush(self, force: bool = False) -> None:
-        """Upload the buffer to S3 if the flush interval has elapsed or force=True."""
+        """Upload the buffer to S3 at the top of each hour (or immediately if forced).
+
+        The S3 key uses _buffer_hour so data collected during e.g. the 19:xx
+        hour is always written to hour=19, regardless of when the flush runs.
+        After a successful flush, _buffer_hour advances to the current hour so
+        the next flush picks up the new hour's data.
+        """
         if not self._buffer:
             return
-        elapsed = time.monotonic() - self._last_flush
-        if not force and elapsed < self._flush_interval:
+        now_hour = datetime.now(tz=timezone.utc).replace(minute=0, second=0, microsecond=0)
+        if not force and now_hour <= self._buffer_hour:
             return
 
         self._batch += 1
-        key = s3_key(self._prefix, datetime.now(tz=timezone.utc), self._batch)
+        key = s3_key(self._prefix, self._buffer_hour, self._batch)
         data = rows_to_parquet(self._buffer)
         row_count = len(self._buffer)
 
@@ -345,7 +353,7 @@ class TrustConsumer(stomp.ConnectionListener):
             return
 
         self._buffer = []
-        self._last_flush = time.monotonic()
+        self._buffer_hour = now_hour
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +383,7 @@ def main() -> None:
     flush_interval = int(os.getenv("FLUSH_INTERVAL_SECS", "3600"))
 
     s3 = _make_s3_client()
-    listener = TrustConsumer(s3, bucket, prefix, flush_interval)
+    listener = TrustConsumer(s3, bucket, prefix)
 
     conn = stomp.Connection([(nrod_host, nrod_port)], heartbeats=(10000, 10000))
     conn.set_listener("", listener)
