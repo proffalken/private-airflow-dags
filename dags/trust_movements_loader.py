@@ -221,7 +221,7 @@ def _load_parquet_to_db(conn, parquet_bytes: bytes) -> int:
 
 @dag(
     dag_id="trust_movements_loader",
-    schedule="@hourly",
+    schedule="5 * * * *",  # 5 min past the hour — gives the consumer time to flush
     start_date=pendulum.datetime(2025, 1, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
