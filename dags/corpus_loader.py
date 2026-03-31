@@ -124,38 +124,26 @@ def corpus_loader():
                 "Check that NROD_USERNAME and NROD_PASSWORD Variables are correct."
             )
 
-        # NR serves the CORPUS as a ZIP archive containing CORPUSExtract.json.
-        # Detect by Content-Type or ZIP magic bytes and extract accordingly.
-        import io
-        import zipfile
+        # NR serves CORPUS as gzip-compressed JSON (Content-Type: binary/octet-stream).
+        # The gzip header contains the original filename (CORPUSExtract.json).
+        # requests only auto-decompresses Content-Encoding: gzip, so we do it manually.
+        import gzip
         import json
 
-        content_type = resp.headers.get("Content-Type", "")
-        is_zip = (
-            "zip" in content_type
-            or "octet-stream" in content_type
-            or resp.content[:2] == b"PK"
-        )
-
-        if is_zip:
-            log.info("Response appears to be a ZIP archive — extracting JSON")
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                names = zf.namelist()
-                log.info("ZIP contents: %s", names)
-                json_name = next((n for n in names if n.lower().endswith(".json")), None)
-                if json_name is None:
-                    raise ValueError(f"No JSON file found in CORPUS ZIP. Contents: {names}")
-                with zf.open(json_name) as f:
-                    data = json.load(f)
+        if resp.content[:2] == b"\x1f\x8b":
+            log.info("Response is gzip-compressed — decompressing")
+            raw = gzip.decompress(resp.content)
         else:
-            try:
-                data = resp.json()
-            except Exception:
-                log.error(
-                    "Response was not JSON. First 500 chars: %s",
-                    resp.text[:500],
-                )
-                raise
+            raw = resp.content
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            log.error(
+                "Response was not JSON after decompression. First 200 bytes: %s",
+                raw[:200],
+            )
+            raise
 
         entry_count = len(data.get("TIPLOCDATA", []))
         log.info("Downloaded %d CORPUS entries", entry_count)
