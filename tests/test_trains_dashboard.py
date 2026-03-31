@@ -1,4 +1,4 @@
-"""Tests for the trains dashboard backend query functions.
+"""Tests for the trains dashboard backend query functions and TOC name helper.
 
 Tests are written first (TDD) and mock the database connection so no
 live PostgreSQL instance is required in CI.
@@ -21,6 +21,7 @@ from app.queries import (  # noqa: E402
     get_recent_movements,
     get_summary,
 )
+from app.toc_names import toc_name  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +46,24 @@ def _mock_conn(fetchone=None, fetchall=None):
     conn = MagicMock()
     conn.cursor.return_value = cursor_ctx
     return conn, cur
+
+
+# ---------------------------------------------------------------------------
+# toc_name helper
+# ---------------------------------------------------------------------------
+
+class TestTocName:
+    def test_known_code_returns_name(self):
+        assert toc_name("94") == "LNER"
+
+    def test_unknown_code_returns_fallback(self):
+        assert toc_name("00") == "TOC 00"
+
+    def test_none_returns_unknown(self):
+        assert toc_name(None) == "Unknown"
+
+    def test_strips_whitespace(self):
+        assert toc_name(" 94 ") == "LNER"
 
 
 # ---------------------------------------------------------------------------
@@ -101,19 +120,19 @@ class TestGetPerformance:
         conn, _ = _mock_conn(fetchall=[("88", 456, 345, 89, 22, 75.7)])
         result = await get_performance(conn)
         row = result[0]
-        assert set(row.keys()) == {"toc_id", "total", "on_time", "late", "early", "on_time_pct"}
+        assert set(row.keys()) == {"toc_id", "toc_name", "total", "on_time", "late", "early", "on_time_pct"}
 
     @pytest.mark.asyncio
-    async def test_maps_values_correctly(self):
-        conn, _ = _mock_conn(fetchall=[("88", 456, 345, 89, 22, 75.7)])
+    async def test_includes_toc_name(self):
+        conn, _ = _mock_conn(fetchall=[("94", 100, 90, 8, 2, 90.0)])
         result = await get_performance(conn)
-        row = result[0]
-        assert row["toc_id"] == "88"
-        assert row["total"] == 456
-        assert row["on_time"] == 345
-        assert row["late"] == 89
-        assert row["early"] == 22
-        assert row["on_time_pct"] == 75.7
+        assert result[0]["toc_name"] == "LNER"
+
+    @pytest.mark.asyncio
+    async def test_unknown_toc_id_fallback(self):
+        conn, _ = _mock_conn(fetchall=[("00", 10, 8, 2, 0, 80.0)])
+        result = await get_performance(conn)
+        assert result[0]["toc_name"] == "TOC 00"
 
     @pytest.mark.asyncio
     async def test_empty_returns_empty_list(self):
@@ -134,7 +153,14 @@ class TestGetPerformance:
 
 class TestGetRecentMovements:
     _ts = datetime(2024, 1, 15, 14, 30, 0, tzinfo=timezone.utc)
-    _row = ("225Y05MX06", "P72253", "88", "DEPARTURE", "73300", "LATE", 3, _ts, _ts, _ts)
+    # Row: train_id, train_uid, toc_id, event_type, loc_stanox, loc_stanme,
+    #      next_report_stanox, next_report_stanme, origin_stanox, origin_stanme,
+    #      variation_status, timetable_variation, actual_ts, planned_ts, msg_queue_ts
+    _row = (
+        "225Y05MX06", "P72253", "88", "DEPARTURE",
+        "73300", "SHEFFIELD", "73530", "DORE & TOTLEY", "73300", "SHEFFIELD",
+        "LATE", 3, _ts, _ts, _ts,
+    )
 
     @pytest.mark.asyncio
     async def test_returns_list(self):
@@ -148,10 +174,29 @@ class TestGetRecentMovements:
         conn, _ = _mock_conn(fetchall=[self._row])
         result = await get_recent_movements(conn)
         row = result[0]
-        for key in ("train_id", "train_uid", "toc_id", "event_type", "loc_stanox",
-                    "variation_status", "timetable_variation",
-                    "actual_ts", "planned_ts", "msg_queue_ts"):
+        for key in (
+            "train_id", "train_uid", "toc_id", "toc_name",
+            "event_type", "loc_stanox", "loc_stanme",
+            "next_report_stanox", "next_report_stanme",
+            "origin_stanox", "origin_stanme",
+            "variation_status", "timetable_variation",
+            "actual_ts", "planned_ts", "msg_queue_ts",
+        ):
             assert key in row, f"missing key: {key}"
+
+    @pytest.mark.asyncio
+    async def test_includes_toc_name(self):
+        conn, _ = _mock_conn(fetchall=[self._row])
+        result = await get_recent_movements(conn)
+        assert result[0]["toc_name"] == "East Midlands Railway"
+
+    @pytest.mark.asyncio
+    async def test_stanme_fields_populated(self):
+        conn, _ = _mock_conn(fetchall=[self._row])
+        result = await get_recent_movements(conn)
+        assert result[0]["loc_stanme"] == "SHEFFIELD"
+        assert result[0]["next_report_stanme"] == "DORE & TOTLEY"
+        assert result[0]["origin_stanme"] == "SHEFFIELD"
 
     @pytest.mark.asyncio
     async def test_timestamps_are_iso_strings(self):
@@ -162,7 +207,7 @@ class TestGetRecentMovements:
     @pytest.mark.asyncio
     async def test_none_timestamp_stays_none(self):
         row = list(self._row)
-        row[7] = None  # actual_ts = None
+        row[12] = None  # actual_ts = None
         conn, _ = _mock_conn(fetchall=[tuple(row)])
         result = await get_recent_movements(conn)
         assert result[0]["actual_ts"] is None
