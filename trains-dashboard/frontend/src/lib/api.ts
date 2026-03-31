@@ -15,6 +15,7 @@ export interface Summary {
 
 export interface TocPerformance {
   toc_id: string
+  toc_name: string
   total: number
   on_time: number
   late: number
@@ -26,8 +27,14 @@ export interface Movement {
   train_id: string | null
   train_uid: string | null
   toc_id: string | null
+  toc_name: string | null
   event_type: string | null
   loc_stanox: string | null
+  loc_stanme: string | null
+  next_report_stanox: string | null
+  next_report_stanme: string | null
+  origin_stanox: string | null
+  origin_stanme: string | null
   variation_status: string | null
   timetable_variation: number | null
   actual_ts: string | null
@@ -40,7 +47,7 @@ export interface HourlyCount {
   count: number
 }
 
-export const getSummary        = () => apiFetch<Summary>('/api/summary')
-export const getPerformance    = () => apiFetch<TocPerformance[]>('/api/performance')
+export const getSummary         = () => apiFetch<Summary>('/api/summary')
+export const getPerformance     = () => apiFetch<TocPerformance[]>('/api/performance')
 export const getRecentMovements = () => apiFetch<Movement[]>('/api/movements/recent')
-export const getHourlyCounts   = () => apiFetch<HourlyCount[]>('/api/movements/hourly')
+export const getHourlyCounts    = () => apiFetch<HourlyCount[]>('/api/movements/hourly')

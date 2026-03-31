@@ -5,6 +5,8 @@ Python dicts/lists so they can be tested without a real database.
 """
 from __future__ import annotations
 
+from .toc_names import toc_name
+
 
 async def get_summary(conn) -> dict:
     """Today's headline stats (UTC day boundary)."""
@@ -63,6 +65,7 @@ async def get_performance(conn) -> list[dict]:
     return [
         {
             "toc_id":      r[0],
+            "toc_name":    toc_name(r[0]),
             "total":       int(r[1]),
             "on_time":     int(r[2]),
             "late":        int(r[3]),
@@ -74,31 +77,88 @@ async def get_performance(conn) -> list[dict]:
 
 
 async def get_recent_movements(conn, limit: int = 100) -> list[dict]:
-    """Most recent movement events, newest first."""
+    """Most recent movement events, newest first.
+
+    Includes:
+    - loc_stanme: human-readable name for the current location STANOX
+      (from stanox_locations; falls back to the STANOX code if not loaded yet)
+    - next_report_stanox / next_report_stanme: next scheduled reporting point,
+      extracted from the stored raw_json body
+    - origin_stanox / origin_stanme: first location seen for this train in
+      the last 24 hours (proxy for journey origin)
+    """
     async with conn.cursor() as cur:
         await cur.execute("""
+            WITH recent AS (
+                SELECT
+                    train_id,
+                    train_uid,
+                    toc_id,
+                    event_type,
+                    loc_stanox,
+                    (raw_json::jsonb -> 'body' ->> 'next_report_stanox') AS next_report_stanox,
+                    variation_status,
+                    timetable_variation,
+                    actual_ts,
+                    planned_ts,
+                    msg_queue_ts
+                FROM train_movements
+                WHERE msg_type = '0003'
+                ORDER BY msg_queue_ts DESC
+                LIMIT %s
+            ),
+            first_seen AS (
+                SELECT DISTINCT ON (m.train_id)
+                    m.train_id,
+                    m.loc_stanox AS origin_stanox
+                FROM train_movements m
+                JOIN (SELECT DISTINCT train_id FROM recent) t USING (train_id)
+                WHERE m.msg_type = '0003'
+                  AND m.msg_queue_ts >= NOW() - INTERVAL '24 hours'
+                ORDER BY m.train_id, m.msg_queue_ts ASC
+            )
             SELECT
-                train_id, train_uid, toc_id, event_type, loc_stanox,
-                variation_status, timetable_variation,
-                actual_ts, planned_ts, msg_queue_ts
-            FROM train_movements
-            WHERE msg_type = '0003'
-            ORDER BY msg_queue_ts DESC
-            LIMIT %s
+                r.train_id,
+                r.train_uid,
+                r.toc_id,
+                r.event_type,
+                r.loc_stanox,
+                COALESCE(sl.stanme,  r.loc_stanox)           AS loc_stanme,
+                r.next_report_stanox,
+                COALESCE(nsl.stanme, r.next_report_stanox)   AS next_report_stanme,
+                f.origin_stanox,
+                COALESCE(osl.stanme, f.origin_stanox)        AS origin_stanme,
+                r.variation_status,
+                r.timetable_variation,
+                r.actual_ts,
+                r.planned_ts,
+                r.msg_queue_ts
+            FROM recent r
+            LEFT JOIN first_seen f    ON f.train_id    = r.train_id
+            LEFT JOIN stanox_locations sl  ON sl.stanox = LPAD(r.loc_stanox, 5, '0')
+            LEFT JOIN stanox_locations nsl ON nsl.stanox = LPAD(r.next_report_stanox, 5, '0')
+            LEFT JOIN stanox_locations osl ON osl.stanox = LPAD(f.origin_stanox, 5, '0')
+            ORDER BY r.msg_queue_ts DESC
         """, (limit,))
         rows = await cur.fetchall()
     return [
         {
-            "train_id":            r[0],
-            "train_uid":           r[1],
-            "toc_id":              r[2],
-            "event_type":          r[3],
-            "loc_stanox":          r[4],
-            "variation_status":    r[5],
-            "timetable_variation": int(r[6]) if r[6] is not None else None,
-            "actual_ts":           r[7].isoformat() if r[7] else None,
-            "planned_ts":          r[8].isoformat() if r[8] else None,
-            "msg_queue_ts":        r[9].isoformat() if r[9] else None,
+            "train_id":             r[0],
+            "train_uid":            r[1],
+            "toc_id":               r[2],
+            "toc_name":             toc_name(r[2]),
+            "event_type":           r[3],
+            "loc_stanox":           r[4],
+            "loc_stanme":           r[5],
+            "next_report_stanox":   r[6],
+            "next_report_stanme":   r[7],
+            "origin_stanox":        r[8],
+            "origin_stanme":        r[9],
+            "variation_status":     r[10],
+            "timetable_variation":  int(r[11]) if r[11] is not None else None,
+            "actual_ts":            r[12].isoformat() if r[12] else None,
+            "planned_ts":           r[13].isoformat() if r[13] else None,
+            "msg_queue_ts":         r[14].isoformat() if r[14] else None,
         }
         for r in rows
     ]
