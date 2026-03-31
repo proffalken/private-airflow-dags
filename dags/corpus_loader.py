@@ -64,17 +64,24 @@ def _parse_corpus(data: dict) -> list[tuple]:
     Filters out entries with no STANOX, zero-pads STANOX to 5 digits,
     and trims all string values.
     """
+    def _s(val) -> str | None:
+        """Coerce a JSON value to a stripped string, or None if blank."""
+        if val is None:
+            return None
+        s = str(val).strip()
+        return s or None
+
     records = []
     for entry in data.get("TIPLOCDATA", []):
-        raw_stanox = entry.get("STANOX", "").strip()
+        raw_stanox = str(entry.get("STANOX") or "").strip()
         if not raw_stanox or raw_stanox == "00000":
             continue
         stanox      = raw_stanox.zfill(5)
-        tiploc      = (entry.get("TIPLOC")  or "").strip() or None
-        stanme      = (entry.get("STANME")  or "").strip() or None
-        crs         = (entry.get("CRS")     or "").strip() or None
-        nlc         = (entry.get("NLC")     or "").strip() or None
-        description = (entry.get("NLCDESC") or "").strip() or None
+        tiploc      = _s(entry.get("TIPLOC"))
+        stanme      = _s(entry.get("STANME"))
+        crs         = _s(entry.get("CRS"))
+        nlc         = _s(entry.get("NLC"))
+        description = _s(entry.get("NLCDESC"))
         records.append((stanox, tiploc, stanme, crs, nlc, description))
     return records
 
