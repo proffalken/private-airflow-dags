@@ -28,7 +28,7 @@ import logging
 
 import pendulum
 from airflow.sdk import dag, task
-from airflow.models import Variable
+from airflow.sdk import Variable
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 log = logging.getLogger(__name__)
@@ -101,14 +101,41 @@ def corpus_loader():
         password = Variable.get("NROD_PASSWORD")
 
         log.info("Downloading CORPUS from %s", CORPUS_URL)
+        # Let requests handle gzip automatically — do not force Accept-Encoding
+        # as that can cause NR's servers to return an undecoded stream.
         resp = requests.get(
             CORPUS_URL,
             auth=(username, password),
             timeout=120,
-            headers={"Accept-Encoding": "gzip"},
         )
-        resp.raise_for_status()
-        data = resp.json()
+
+        log.info(
+            "Response: HTTP %s, Content-Type: %s, Content-Length: %s bytes",
+            resp.status_code,
+            resp.headers.get("Content-Type", "unknown"),
+            len(resp.content),
+        )
+
+        if not resp.ok:
+            # Log the first 500 chars of an error body to aid debugging
+            log.error("Error response body: %s", resp.text[:500])
+            resp.raise_for_status()
+
+        if not resp.content:
+            raise ValueError(
+                f"CORPUS download returned an empty body (HTTP {resp.status_code}). "
+                "Check that NROD_USERNAME and NROD_PASSWORD Variables are correct."
+            )
+
+        try:
+            data = resp.json()
+        except Exception:
+            log.error(
+                "Response was not JSON. First 500 chars: %s",
+                resp.text[:500],
+            )
+            raise
+
         entry_count = len(data.get("TIPLOCDATA", []))
         log.info("Downloaded %d CORPUS entries", entry_count)
         return data
