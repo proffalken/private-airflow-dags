@@ -12,7 +12,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "dags"))
 # Stub Airflow before import
 for _mod in [
     "airflow", "airflow.sdk",
-    "airflow.models", "airflow.models.variable",
     "airflow.providers", "airflow.providers.postgres",
     "airflow.providers.postgres.hooks",
     "airflow.providers.postgres.hooks.postgres",
