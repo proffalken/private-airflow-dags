@@ -33,10 +33,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 log = logging.getLogger(__name__)
 
-CORPUS_URL = (
-    "https://publicdatafeeds.networkrail.co.uk"
-    "/ntrod/SupportingFileAuthentication?type=CORPUS"
-)
+CORPUS_URL = "https://datafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type=CORPUS"
 
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS stanox_locations (
