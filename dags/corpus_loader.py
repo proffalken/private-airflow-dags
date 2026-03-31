@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS stanox_locations (
     tiploc      VARCHAR(7),
     stanme      VARCHAR(26),
     crs         VARCHAR(3),
-    nlc         VARCHAR(4),
+    nlc         VARCHAR(6),
     description TEXT
 );
 """
@@ -166,6 +166,10 @@ def corpus_loader():
         with hook.get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(_CREATE_TABLE_SQL)
+                # Widen nlc if it was created with the old VARCHAR(4) definition
+                cur.execute(
+                    "ALTER TABLE stanox_locations ALTER COLUMN nlc TYPE VARCHAR(6)"
+                )
                 conn.commit()
 
                 # Batch in chunks of 500 to avoid very large transactions
