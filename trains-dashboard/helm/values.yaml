@@ -1,0 +1,44 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets:
+  - name: ghcr-credentials
+
+backend:
+  image:
+    repository: ghcr.io/proffalken/private-airflow-dags/trains-dashboard-backend
+    tag: latest
+    pullPolicy: Always
+  replicas: 1
+  # k8s Secret must contain: DATABASE_URL
+  secretName: trains-dashboard-secret
+  env:
+    OTEL_SERVICE_NAME: trains-dashboard-backend
+    OTEL_EXPORTER_OTLP_ENDPOINT: ""  # set to your collector if desired
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+frontend:
+  image:
+    repository: ghcr.io/proffalken/private-airflow-dags/trains-dashboard-frontend
+    tag: latest
+    pullPolicy: Always
+  replicas: 1
+  # BACKEND_URL uses the in-cluster service name
+  backendUrl: "http://trains-dashboard-backend:8000"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+ingress:
+  host: trains.wallace.network
+  tlsSecret: trains-dashboard-tls

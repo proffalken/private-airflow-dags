@@ -1,0 +1,6 @@
+apiVersion: v2
+name: trains-dashboard
+description: TRUST movement dashboard for trains.wallace.network
+type: application
+version: 0.1.0
+appVersion: "latest"
