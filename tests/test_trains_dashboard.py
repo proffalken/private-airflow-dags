@@ -54,7 +54,7 @@ def _mock_conn(fetchone=None, fetchall=None):
 
 class TestTocName:
     def test_known_code_returns_name(self):
-        assert toc_name("94") == "LNER"
+        assert toc_name("61") == "London North Eastern Railway"
 
     def test_unknown_code_returns_fallback(self):
         assert toc_name("00") == "TOC 00"
@@ -63,7 +63,7 @@ class TestTocName:
         assert toc_name(None) == "Unknown"
 
     def test_strips_whitespace(self):
-        assert toc_name(" 94 ") == "LNER"
+        assert toc_name(" 61 ") == "London North Eastern Railway"
 
 
 # ---------------------------------------------------------------------------
@@ -124,9 +124,9 @@ class TestGetPerformance:
 
     @pytest.mark.asyncio
     async def test_includes_toc_name(self):
-        conn, _ = _mock_conn(fetchall=[("94", 100, 90, 8, 2, 90.0)])
+        conn, _ = _mock_conn(fetchall=[("61", 100, 90, 8, 2, 90.0)])
         result = await get_performance(conn)
-        assert result[0]["toc_name"] == "LNER"
+        assert result[0]["toc_name"] == "London North Eastern Railway"
 
     @pytest.mark.asyncio
     async def test_unknown_toc_id_fallback(self):
@@ -157,7 +157,7 @@ class TestGetRecentMovements:
     #      next_report_stanox, next_report_stanme, origin_stanox, origin_stanme,
     #      variation_status, timetable_variation, actual_ts, planned_ts, msg_queue_ts
     _row = (
-        "225Y05MX06", "P72253", "88", "DEPARTURE",
+        "225Y05MX06", "P72253", "28", "DEPARTURE",
         "73300", "SHEFFIELD", "73530", "DORE & TOTLEY", "73300", "SHEFFIELD",
         "LATE", 3, _ts, _ts, _ts,
     )
