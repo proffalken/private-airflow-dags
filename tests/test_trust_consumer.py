@@ -322,3 +322,47 @@ class TestTrustConsumer:
         body = s3.put_object.call_args.kwargs["Body"]
         table = pq.read_table(io.BytesIO(body))
         assert table.num_rows == 1
+
+    def test_on_message_records_last_message_time(self):
+        consumer, _ = self._make_consumer()
+        assert consumer._last_message_time is None
+        consumer.on_message(self._make_frame(MOVEMENT_MSG))
+        assert consumer._last_message_time is not None
+
+    def test_emit_metrics_sets_buffer_size(self):
+        consumer, _ = self._make_consumer()
+        gauge = MagicMock()
+        consumer._buffer_size_gauge = gauge
+        consumer.on_message(self._make_frame(MOVEMENT_MSG, CANCELLATION_MSG))
+        consumer.emit_metrics(connected=True)
+        gauge.set.assert_called_with(2)
+
+    def test_emit_metrics_sets_connected_1_when_up(self):
+        consumer, _ = self._make_consumer()
+        gauge = MagicMock()
+        consumer._connected_gauge = gauge
+        consumer.emit_metrics(connected=True)
+        gauge.set.assert_called_with(1)
+
+    def test_emit_metrics_sets_connected_0_when_down(self):
+        consumer, _ = self._make_consumer()
+        gauge = MagicMock()
+        consumer._connected_gauge = gauge
+        consumer.emit_metrics(connected=False)
+        gauge.set.assert_called_with(0)
+
+    def test_emit_metrics_last_message_age_negative_before_first_message(self):
+        consumer, _ = self._make_consumer()
+        gauge = MagicMock()
+        consumer._last_message_age_gauge = gauge
+        consumer.emit_metrics(connected=True)
+        gauge.set.assert_called_with(-1)
+
+    def test_emit_metrics_last_message_age_positive_after_message(self):
+        consumer, _ = self._make_consumer()
+        gauge = MagicMock()
+        consumer._last_message_age_gauge = gauge
+        consumer.on_message(self._make_frame(MOVEMENT_MSG))
+        consumer.emit_metrics(connected=True)
+        age = gauge.set.call_args[0][0]
+        assert age >= 0

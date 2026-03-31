@@ -279,6 +279,7 @@ class TrustConsumer(stomp.ConnectionListener):
             minute=0, second=0, microsecond=0
         )
         self._batch = 0
+        self._last_message_time: float | None = None
 
         # OTel instruments (None if OTel is not configured)
         meter = _get_meter()
@@ -297,6 +298,23 @@ class TrustConsumer(stomp.ConnectionListener):
                                  description="Rows written to S3 Parquet")
             if meter else None
         )
+        # Gauges emitted every 30s from the main loop so Dash0 can graph
+        # buffer fill rate, connection health, and feed staleness.
+        self._buffer_size_gauge = (
+            meter.create_gauge("trust.buffer_size", unit="1",
+                               description="Number of rows currently buffered awaiting S3 flush")
+            if meter else None
+        )
+        self._connected_gauge = (
+            meter.create_gauge("trust.connected", unit="1",
+                               description="1 if STOMP connection is up, 0 if disconnected")
+            if meter else None
+        )
+        self._last_message_age_gauge = (
+            meter.create_gauge("trust.last_message_age_seconds", unit="s",
+                               description="Seconds since the last TRUST message was received")
+            if meter else None
+        )
 
     # -- stomp.ConnectionListener callbacks ----------------------------------
 
@@ -306,6 +324,7 @@ class TrustConsumer(stomp.ConnectionListener):
             return
         rows = [message_to_row(m) for m in messages]
         self._buffer.extend(rows)
+        self._last_message_time = time.monotonic()
         if self._messages_received:
             self._messages_received.add(len(rows))
         self.flush()
@@ -315,6 +334,21 @@ class TrustConsumer(stomp.ConnectionListener):
 
     def on_disconnected(self) -> None:
         logger.warning("STOMP disconnected — main loop will reconnect")
+
+    # -- Metrics -------------------------------------------------------------
+
+    def emit_metrics(self, connected: bool) -> None:
+        """Emit periodic gauges for Dash0 graphing. Called every 30s from main loop."""
+        if self._buffer_size_gauge:
+            self._buffer_size_gauge.set(len(self._buffer))
+        if self._connected_gauge:
+            self._connected_gauge.set(1 if connected else 0)
+        if self._last_message_age_gauge:
+            if self._last_message_time is not None:
+                age = time.monotonic() - self._last_message_time
+            else:
+                age = -1  # -1 indicates no message received yet this session
+            self._last_message_age_gauge.set(age)
 
     # -- Flush ---------------------------------------------------------------
 
@@ -380,7 +414,6 @@ def main() -> None:
     password = os.environ["NROD_PASSWORD"]
     bucket = os.getenv("S3_BUCKET", "airflow-staging")
     prefix = os.getenv("S3_PREFIX", "trust-movements")
-    flush_interval = int(os.getenv("FLUSH_INTERVAL_SECS", "3600"))
 
     s3 = _make_s3_client()
     listener = TrustConsumer(s3, bucket, prefix)
@@ -415,6 +448,8 @@ def main() -> None:
                 _connect()
             # Flush buffer if we've crossed an hour boundary
             listener.flush()
+            # Emit gauges for Dash0 dashboards
+            listener.emit_metrics(connected=conn.is_connected())
             # Update liveness heartbeat file for k8s probe
             open("/tmp/alive", "w").close()
     except Exception:
