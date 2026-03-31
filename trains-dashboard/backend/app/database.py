@@ -13,7 +13,7 @@ _CREATE_STANOX_TABLE = """
         tiploc      VARCHAR(7),
         stanme      VARCHAR(26),
         crs         VARCHAR(3),
-        nlc         VARCHAR(4),
+        nlc         VARCHAR(6),
         description TEXT
     )
 """
