@@ -14,7 +14,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import close_pool, get_connection, open_pool
-from .queries import get_hourly_counts, get_performance, get_recent_movements, get_summary
+from .queries import get_hourly_counts, get_otp_trend, get_performance, get_recent_movements, get_station_delays, get_summary
 
 logger = logging.getLogger("trains_dashboard")
 
@@ -85,6 +85,20 @@ async def recent_movements(limit: int = Query(default=100, le=500)):
     """Most recent movement events, newest first."""
     async with get_connection() as conn:
         return await get_recent_movements(conn, limit)
+
+
+@app.get("/api/stations/delays")
+async def station_delays():
+    """Top 20 stations by late-movement count for the last 24 hours."""
+    async with get_connection() as conn:
+        return await get_station_delays(conn)
+
+
+@app.get("/api/movements/otp-trend")
+async def otp_trend():
+    """On-time percentage per hour for the last 24 hours."""
+    async with get_connection() as conn:
+        return await get_otp_trend(conn)
 
 
 @app.get("/api/movements/hourly")

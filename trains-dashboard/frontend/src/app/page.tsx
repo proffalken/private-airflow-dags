@@ -1,5 +1,5 @@
-import { getSummary, getPerformance, getRecentMovements, getHourlyCounts } from '@/lib/api'
-import { HourlyChart, PerformanceChart } from '@/components/Charts'
+import { getSummary, getPerformance, getStationDelays, getOtpTrend, getRecentMovements, getHourlyCounts } from '@/lib/api'
+import { HourlyChart, OtpTrendChart, TocDelaysChart, StationDelaysChart } from '@/components/Charts'
 import { MovementsTable } from '@/components/MovementsTable'
 
 function StatCard({
@@ -23,11 +23,13 @@ function StatCard({
 }
 
 export default async function Dashboard() {
-  const [summary, performance, movements, hourly] = await Promise.all([
+  const [summary, performance, stationDelays, otpTrend, movements, hourly] = await Promise.all([
     getSummary().catch(() => ({
       total_movements: 0, cancellations: 0, on_time_pct: 0, avg_delay_mins: 0,
     })),
     getPerformance().catch(() => []),
+    getStationDelays().catch(() => []),
+    getOtpTrend().catch(() => []),
     getRecentMovements().catch(() => []),
     getHourlyCounts().catch(() => []),
   ])
@@ -69,10 +71,12 @@ export default async function Dashboard() {
         />
       </div>
 
-      {/* Charts */}
+      {/* Charts — row 1: volume + OTP trend; row 2: TOC delays + station delays */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <HourlyChart data={hourly} />
-        <PerformanceChart data={performance} />
+        <OtpTrendChart data={otpTrend} />
+        <TocDelaysChart data={performance} />
+        <StationDelaysChart data={stationDelays} />
       </div>
 
       {/* Movements table */}

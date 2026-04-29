@@ -164,6 +164,74 @@ async def get_recent_movements(conn, limit: int = 100) -> list[dict]:
     ]
 
 
+async def get_station_delays(conn) -> list[dict]:
+    """Top 20 stations by late-movement count for the last 24 hours."""
+    async with conn.cursor() as cur:
+        await cur.execute("""
+            SELECT
+                m.loc_stanox,
+                COALESCE(sl.stanme, sl.description, m.loc_stanox) AS station_name,
+                COUNT(*)                                            AS late_count,
+                COUNT(*) FILTER (WHERE m.variation_status = 'ON TIME') AS on_time_count,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (WHERE m.variation_status = 'LATE')
+                    / NULLIF(COUNT(*), 0),
+                    1
+                )                                                   AS late_pct
+            FROM train_movements m
+            LEFT JOIN stanox_locations sl
+                ON sl.stanox = LPAD(m.loc_stanox, 5, '0')
+            WHERE m.msg_type = '0003'
+              AND m.msg_queue_ts >= NOW() - INTERVAL '24 hours'
+              AND m.variation_status = 'LATE'
+              AND m.loc_stanox IS NOT NULL
+            GROUP BY m.loc_stanox, station_name
+            ORDER BY late_count DESC
+            LIMIT 20
+        """)
+        rows = await cur.fetchall()
+    return [
+        {
+            "loc_stanox":   r[0],
+            "station_name": r[1],
+            "late_count":   int(r[2]),
+            "on_time_count": int(r[3]),
+            "late_pct":     float(r[4] or 0.0),
+        }
+        for r in rows
+    ]
+
+
+async def get_otp_trend(conn) -> list[dict]:
+    """On-time percentage per hour for the last 24 hours."""
+    async with conn.cursor() as cur:
+        await cur.execute("""
+            SELECT
+                DATE_TRUNC('hour', msg_queue_ts) AS hour,
+                ROUND(
+                    100.0
+                    * COUNT(*) FILTER (WHERE variation_status = 'ON TIME')
+                    / NULLIF(COUNT(*), 0),
+                    1
+                ) AS on_time_pct,
+                COUNT(*) AS total
+            FROM train_movements
+            WHERE msg_type = '0003'
+              AND msg_queue_ts >= NOW() - INTERVAL '24 hours'
+            GROUP BY 1
+            ORDER BY 1
+        """)
+        rows = await cur.fetchall()
+    return [
+        {
+            "hour":        r[0].isoformat() if r[0] else None,
+            "on_time_pct": float(r[1] or 0.0),
+            "total":       int(r[2]),
+        }
+        for r in rows
+    ]
+
+
 async def get_hourly_counts(conn) -> list[dict]:
     """Movement count per hour for the last 24 hours."""
     async with conn.cursor() as cur:

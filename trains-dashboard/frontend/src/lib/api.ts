@@ -47,7 +47,23 @@ export interface HourlyCount {
   count: number
 }
 
+export interface OtpHour {
+  hour:        string
+  on_time_pct: number
+  total:       number
+}
+
+export interface StationDelay {
+  loc_stanox:    string
+  station_name:  string
+  late_count:    number
+  on_time_count: number
+  late_pct:      number
+}
+
 export const getSummary         = () => apiFetch<Summary>('/api/summary')
 export const getPerformance     = () => apiFetch<TocPerformance[]>('/api/performance')
+export const getStationDelays   = () => apiFetch<StationDelay[]>('/api/stations/delays')
+export const getOtpTrend        = () => apiFetch<OtpHour[]>('/api/movements/otp-trend')
 export const getRecentMovements = () => apiFetch<Movement[]>('/api/movements/recent')
 export const getHourlyCounts    = () => apiFetch<HourlyCount[]>('/api/movements/hourly')

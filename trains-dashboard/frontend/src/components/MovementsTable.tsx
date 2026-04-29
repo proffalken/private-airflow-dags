@@ -62,11 +62,23 @@ export function MovementsTable({ data }: { data: Movement[] }) {
 
       {/* Table */}
       <div className="overflow-x-auto">
-        <table className="w-full text-sm text-left">
+        <table className="w-full min-w-[700px] text-sm text-left table-fixed">
+          <colgroup>
+            <col className="w-24" />   {/* Train */}
+            <col className="w-32" />   {/* Operator */}
+            <col className="w-20" />   {/* Event */}
+            <col className="w-28" />   {/* From */}
+            <col className="w-28" />   {/* At */}
+            <col className="w-28" />   {/* Next */}
+            <col className="w-20" />   {/* Status */}
+            <col className="w-20" />   {/* Variation */}
+            <col className="w-16" />   {/* Actual */}
+            <col className="w-16" />   {/* Reported */}
+          </colgroup>
           <thead>
             <tr className="text-slate-400 border-b border-slate-700">
               {COLUMNS.map(({ key, label }) => (
-                <th key={key} className="pb-2 pr-4 font-medium whitespace-nowrap">{label}</th>
+                <th key={key} className="pb-2 pr-2 font-medium whitespace-nowrap">{label}</th>
               ))}
             </tr>
           </thead>
@@ -76,33 +88,33 @@ export function MovementsTable({ data }: { data: Movement[] }) {
                 key={i}
                 className="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors"
               >
-                <td className="py-1.5 pr-4 font-mono text-slate-200 text-xs whitespace-nowrap">
+                <td className="py-1.5 pr-2 font-mono text-slate-200 text-xs truncate">
                   {m.train_id ?? '—'}
                 </td>
-                <td className="py-1.5 pr-4 text-slate-300 whitespace-nowrap">
+                <td className="py-1.5 pr-2 text-slate-300 truncate" title={m.toc_name ?? m.toc_id ?? ''}>
                   {m.toc_name ?? m.toc_id ?? '—'}
                 </td>
-                <td className="py-1.5 pr-4 text-slate-300 whitespace-nowrap">
+                <td className="py-1.5 pr-2 text-slate-300 whitespace-nowrap">
                   {m.event_type ?? '—'}
                 </td>
-                <td className="py-1.5 pr-4 text-slate-400 whitespace-nowrap text-xs">
+                <td className="py-1.5 pr-2 text-slate-400 text-xs truncate" title={stanox(m.origin_stanox, m.origin_stanme)}>
                   {stanox(m.origin_stanox, m.origin_stanme)}
                 </td>
-                <td className="py-1.5 pr-4 text-slate-300 whitespace-nowrap">
+                <td className="py-1.5 pr-2 text-slate-300 truncate" title={stanox(m.loc_stanox, m.loc_stanme)}>
                   {stanox(m.loc_stanox, m.loc_stanme)}
                 </td>
-                <td className="py-1.5 pr-4 text-slate-400 whitespace-nowrap text-xs">
+                <td className="py-1.5 pr-2 text-slate-400 text-xs truncate" title={stanox(m.next_report_stanox, m.next_report_stanme)}>
                   {stanox(m.next_report_stanox, m.next_report_stanme)}
                 </td>
-                <td className={`py-1.5 pr-4 font-medium whitespace-nowrap ${statusColour[m.variation_status ?? ''] ?? 'text-slate-400'}`}>
+                <td className={`py-1.5 pr-2 font-medium whitespace-nowrap ${statusColour[m.variation_status ?? ''] ?? 'text-slate-400'}`}>
                   {m.variation_status ?? '—'}
                 </td>
-                <td className="py-1.5 pr-4 text-slate-300 whitespace-nowrap tabular-nums">
+                <td className="py-1.5 pr-2 text-slate-300 whitespace-nowrap tabular-nums">
                   {m.timetable_variation != null
                     ? `${m.timetable_variation > 0 ? '+' : ''}${m.timetable_variation} min`
                     : '—'}
                 </td>
-                <td className="py-1.5 pr-4 font-mono text-slate-400 whitespace-nowrap text-xs">
+                <td className="py-1.5 pr-2 font-mono text-slate-400 whitespace-nowrap text-xs">
                   {fmt(m.actual_ts)}
                 </td>
                 <td className="py-1.5 font-mono text-slate-400 whitespace-nowrap text-xs">
