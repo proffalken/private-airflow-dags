@@ -164,36 +164,33 @@ def _compute_daily_summary(conn, summary_date: date) -> None:
         s["cancelled"] += cnt
 
     # Upsert
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO trust_daily_summary
-                (summary_date, toc_id, on_time_count, late_count, early_count,
-                 cancelled_count, total_movements, avg_variation)
-            VALUES %s
-            ON CONFLICT (summary_date, toc_id) DO UPDATE SET
-                on_time_count   = EXCLUDED.on_time_count,
-                late_count      = EXCLUDED.late_count,
-                early_count     = EXCLUDED.early_count,
-                cancelled_count = EXCLUDED.cancelled_count,
-                total_movements = EXCLUDED.total_movements,
-                avg_variation   = EXCLUDED.avg_variation
-            """.replace(
-                "VALUES %s",
-                "VALUES " + ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s)"] * len(toc_stats))
-                if toc_stats else "VALUES (NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL) WHERE false",
-            ),
-            [
-                val
-                for toc_id, s in toc_stats.items()
-                for val in (
-                    summary_date, toc_id,
-                    s["on_time"], s["late"], s["early"], s["cancelled"],
-                    s["total"], avg_rows.get(toc_id),
-                )
-            ] if toc_stats else [],
-        )
-    conn.commit()
+    if toc_stats:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO trust_daily_summary
+                    (summary_date, toc_id, on_time_count, late_count, early_count,
+                     cancelled_count, total_movements, avg_variation)
+                VALUES """ + ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s)"] * len(toc_stats)) + """
+                ON CONFLICT (summary_date, toc_id) DO UPDATE SET
+                    on_time_count   = EXCLUDED.on_time_count,
+                    late_count      = EXCLUDED.late_count,
+                    early_count     = EXCLUDED.early_count,
+                    cancelled_count = EXCLUDED.cancelled_count,
+                    total_movements = EXCLUDED.total_movements,
+                    avg_variation   = EXCLUDED.avg_variation
+                """,
+                [
+                    val
+                    for toc_id, s in toc_stats.items()
+                    for val in (
+                        summary_date, toc_id,
+                        s["on_time"], s["late"], s["early"], s["cancelled"],
+                        s["total"], avg_rows.get(toc_id),
+                    )
+                ],
+            )
+        conn.commit()
     logger.info("Upserted summary for %s: %d TOCs", summary_date, len(toc_stats))
 
 
