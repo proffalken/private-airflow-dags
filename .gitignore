@@ -6,6 +6,8 @@ __pycache__/
 venv/
 dist/
 build/
+# Exclude Next.js app router routes named "build" from the above
+!social-archive/frontend/src/app/build/
 
 # Node / Next.js
 node_modules/
