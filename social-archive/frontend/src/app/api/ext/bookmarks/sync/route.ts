@@ -11,15 +11,36 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const body = await request.json()
-  const res = await fetch(`${BACKEND_URL}/api/bookmarks/sync`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: authHeader,
-    },
-    body: JSON.stringify(body),
-  })
-  const data = await res.json()
+  let body: unknown
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+
+  let res: Response
+  try {
+    res = await fetch(`${BACKEND_URL}/api/bookmarks/sync`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: authHeader,
+      },
+      body: JSON.stringify(body),
+    })
+  } catch (err) {
+    return NextResponse.json(
+      { error: `Backend unreachable: ${err instanceof Error ? err.message : err}` },
+      { status: 502 },
+    )
+  }
+
+  const text = await res.text()
+  let data: unknown
+  try {
+    data = JSON.parse(text)
+  } catch {
+    data = { error: text }
+  }
   return NextResponse.json(data, { status: res.status })
 }

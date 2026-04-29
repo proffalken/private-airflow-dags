@@ -99,7 +99,14 @@ async function runSync() {
       token = null // force re-auth on next attempt
       continue
     }
-    if (!res.ok) throw new Error(`Sync failed: ${res.status}`)
+    if (!res.ok) {
+      let detail = `${res.status}`
+      try {
+        const errBody = await res.json()
+        detail = errBody.detail || errBody.error || JSON.stringify(errBody)
+      } catch (_) {}
+      throw new Error(`Sync failed (${res.status}): ${detail}`)
+    }
 
     const result = await res.json()
     const now = new Date().toISOString()

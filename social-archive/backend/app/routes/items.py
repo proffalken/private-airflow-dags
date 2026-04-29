@@ -154,13 +154,21 @@ async def sync_bookmarks(
     if not body.bookmarks:
         return BookmarkSyncResponse(inserted=0, skipped=0)
 
-    uris = [b.uri for b in body.bookmarks]
+    # Deduplicate within the batch — same URL can appear in multiple folders
+    seen: set[str] = set()
+    unique_bookmarks = []
+    for b in body.bookmarks:
+        if b.uri not in seen:
+            seen.add(b.uri)
+            unique_bookmarks.append(b)
+
+    uris = [b.uri for b in unique_bookmarks]
 
     async with db.cursor() as cur:
         await cur.execute("SELECT uri FROM saved_items WHERE uri = ANY(%s)", (uris,))
         existing = {r[0] for r in await cur.fetchall()}
 
-    new_items = [b for b in body.bookmarks if b.uri not in existing]
+    new_items = [b for b in unique_bookmarks if b.uri not in existing]
 
     if new_items:
         async with db.cursor() as cur:
@@ -169,6 +177,7 @@ async def sync_bookmarks(
                 INSERT INTO saved_items
                     (source, source_context, type, title, uri, external_id, tags, saved_at)
                 VALUES (%s, %s, 'bookmark', %s, %s, %s, %s, NOW())
+                ON CONFLICT (source, external_id) DO NOTHING
                 """,
                 [
                     (b.source, b.source_context, b.title, b.uri, b.uri, b.tags)
