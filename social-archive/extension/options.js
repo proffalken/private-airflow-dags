@@ -7,6 +7,7 @@ async function load() {
     'backendUrl', 'username', 'password', 'syncIntervalMinutes',
   ])
   $('backendUrl').value = data.backendUrl || 'https://social-archive.wallace.network'
+  // backendUrl is the frontend host — the extension routes through /api/ext/*
   $('username').value = data.username || ''
   $('password').value = data.password || ''
   $('syncInterval').value = data.syncIntervalMinutes || 60

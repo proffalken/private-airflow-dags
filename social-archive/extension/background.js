@@ -45,7 +45,9 @@ function flattenBookmarks(nodes, ancestorFolders = []) {
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
 async function getToken(backendUrl, username, password) {
-  const res = await fetch(`${backendUrl}/auth/login`, {
+  // Uses /api/ext/login which returns the token in the body (unlike the
+  // browser login route which sets an httpOnly cookie and returns {ok:true})
+  const res = await fetch(`${backendUrl}/api/ext/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
@@ -84,7 +86,7 @@ async function runSync() {
       await chrome.storage.local.set({ token })
     }
 
-    const res = await fetch(`${backendUrl}/api/bookmarks/sync`, {
+    const res = await fetch(`${backendUrl}/api/ext/bookmarks/sync`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
