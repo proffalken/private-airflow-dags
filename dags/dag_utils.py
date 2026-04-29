@@ -42,6 +42,9 @@ def parse_llm_json(raw: str, item_id: str) -> dict:
     """
     text = raw.strip()
 
+    # Strip <think>...</think> blocks emitted by reasoning models (e.g. qwen3)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
     # Strip markdown code fences
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)

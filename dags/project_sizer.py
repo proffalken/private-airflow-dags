@@ -195,6 +195,7 @@ def project_sizer():
                                 model=OLLAMA_MODEL,
                                 max_tokens=256,
                                 temperature=0.2,
+                                timeout=60,
                                 messages=[{"role": "user", "content": prompt}],
                             )
                             raw = response.choices[0].message.content or ""
@@ -224,14 +225,15 @@ def project_sizer():
                             """,
                             (estimate, reasoning, item["id"]),
                         )
+                        conn.commit()
                         results.append({"id": item["id"], "estimate": estimate})
                         estimated_counter.add(1)
-                        logger.info(
+                        logger.debug(
                             "Item %s (%s): %s — %s",
                             item["id"], item["source"], estimate, reasoning,
                         )
-
-                conn.commit()
+                        if len(results) % 50 == 0:
+                            logger.info("Progress: %d/%d items estimated", len(results), len(items))
 
         span.set_attribute("items.estimated", len(results))
         logger.info("Sizing complete: %d estimated, %d skipped", len(results), len(items) - len(results))
