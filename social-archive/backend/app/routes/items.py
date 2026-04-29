@@ -166,11 +166,12 @@ async def sync_bookmarks(
         async with db.cursor() as cur:
             await cur.executemany(
                 """
-                INSERT INTO saved_items (source, source_context, type, title, uri, tags, saved_at)
-                VALUES (%s, %s, 'bookmark', %s, %s, %s, NOW())
+                INSERT INTO saved_items
+                    (source, source_context, type, title, uri, external_id, tags, saved_at)
+                VALUES (%s, %s, 'bookmark', %s, %s, %s, %s, NOW())
                 """,
                 [
-                    (b.source, b.source_context, b.title, b.uri, b.tags)
+                    (b.source, b.source_context, b.title, b.uri, b.uri, b.tags)
                     for b in new_items
                 ],
             )
