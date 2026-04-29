@@ -253,6 +253,11 @@ def trust_movements_loader():
         """Load the previous hour's Parquet files from S3 into Postgres."""
         ctx = get_current_context()
         interval_start: datetime = ctx["data_interval_start"]
+        # In Airflow 3, data_interval_start equals the logical date (current scheduled
+        # time). The consumer flushes hour=N data at N+1:00; we run at N+1:05. Subtract
+        # one hour so the S3 prefix points at the hour that was just flushed.
+        from datetime import timedelta
+        data_hour = interval_start - timedelta(hours=1)
         otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
         with instrument_task_context({
@@ -276,11 +281,11 @@ def trust_movements_loader():
             pg = PostgresHook(postgres_conn_id="rail_network_db")
             conn = pg.get_conn()
 
-            # Ensure the partition for this month exists before inserting
-            _ensure_partition(conn, interval_start.year, interval_start.month)
+            # Ensure the partition for the data hour's month exists before inserting
+            _ensure_partition(conn, data_hour.year, data_hour.month)
 
-            keys = _list_pending_keys(s3, STAGING_BUCKET, S3_PREFIX, interval_start)
-            logger.info("Found %d pending files for %s", len(keys), interval_start.isoformat())
+            keys = _list_pending_keys(s3, STAGING_BUCKET, S3_PREFIX, data_hour)
+            logger.info("Found %d pending files for %s", len(keys), data_hour.isoformat())
 
             total_rows = 0
             total_files = 0
