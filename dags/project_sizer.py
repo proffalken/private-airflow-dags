@@ -24,7 +24,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import dag, task
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import get_llm_client, OLLAMA_MODEL, parse_llm_json
+from dag_utils import ollama_chat, OLLAMA_MODEL, parse_llm_json
 
 logger = logging.getLogger("airflow.project_sizer")
 
@@ -99,16 +99,14 @@ def project_sizer():
         resp.raise_for_status()
         logger.info("Model loaded. Verifying inference...")
 
-        client = get_llm_client()
         for attempt in range(12):  # up to 1 minute
             try:
-                response = client.chat.completions.create(
-                    model=OLLAMA_MODEL,
+                content = ollama_chat(
+                    [{"role": "user", "content": "Reply with the word OK."}],
                     max_tokens=10,
-                    messages=[{"role": "user", "content": "Reply with the word OK."}],
+                    timeout=15,
                 )
-                content = response.choices[0].message.content if response.choices else None
-                if content is not None:
+                if content:
                     logger.info("Model ready (response: %r)", content[:50])
                     return
             except Exception as exc:
@@ -161,7 +159,6 @@ def project_sizer():
             logger.info("Nothing to estimate.")
             return []
 
-        client = get_llm_client()
         hook = PostgresHook(postgres_conn_id="social_archive_db")
 
         results = []
@@ -190,15 +187,11 @@ def project_sizer():
                         )
 
                         try:
-                            response = client.chat.completions.create(
-                                model=OLLAMA_MODEL,
+                            raw = ollama_chat(
+                                [{"role": "user", "content": prompt}],
                                 max_tokens=512,
-                                temperature=0.2,
                                 timeout=60,
-                                extra_body={"think": False},
-                                messages=[{"role": "user", "content": prompt}],
                             )
-                            raw = response.choices[0].message.content or ""
                             parsed = parse_llm_json(raw, str(item["id"]))
                         except Exception as exc:
                             logger.warning("LLM call failed for item %s: %s", item["id"], exc)

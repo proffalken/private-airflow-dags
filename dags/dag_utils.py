@@ -9,6 +9,7 @@ import re
 logger = logging.getLogger(__name__)
 
 OLLAMA_BASE_URL = "http://ollama.ollama.svc.cluster.local:11434/v1"
+OLLAMA_NATIVE_URL = "http://ollama.ollama.svc.cluster.local:11434"
 OLLAMA_MODEL = "huihui_ai/qwen3-abliterated:4b"
 
 
@@ -16,6 +17,32 @@ def get_llm_client():
     """Return an OpenAI-compatible client pointed at the local Ollama instance."""
     from openai import OpenAI
     return OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
+
+
+def ollama_chat(
+    messages: list[dict],
+    *,
+    model: str = OLLAMA_MODEL,
+    max_tokens: int = 512,
+    temperature: float = 0.2,
+    timeout: int = 60,
+) -> str:
+    """Call Ollama's native /api/chat with thinking disabled.
+
+    The OpenAI-compatible endpoint ignores extra_body think:false for complex
+    prompts; the native API respects it reliably.
+    """
+    import requests
+    body = {
+        "model": model,
+        "stream": False,
+        "think": False,
+        "options": {"num_predict": max_tokens, "temperature": temperature},
+        "messages": messages,
+    }
+    resp = requests.post(f"{OLLAMA_NATIVE_URL}/api/chat", json=body, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()["message"]["content"]
 
 
 def instrument_llm() -> None:
