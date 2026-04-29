@@ -47,3 +47,20 @@ class FlagRequest(BaseModel):
 class EditRequest(BaseModel):
     title: Optional[str] = None
     tags: Optional[list[str]] = None
+
+
+class BookmarkItem(BaseModel):
+    title: Optional[str] = None
+    uri: str
+    source: str
+    source_context: Optional[str] = None
+    tags: list[str] = []
+
+
+class BookmarkSyncRequest(BaseModel):
+    bookmarks: list[BookmarkItem]
+
+
+class BookmarkSyncResponse(BaseModel):
+    inserted: int
+    skipped: int

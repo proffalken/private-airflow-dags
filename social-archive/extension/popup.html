@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Social Archive Sync</title>
+  <style>
+    body { font-family: system-ui, sans-serif; width: 260px; padding: 16px; color: #1a1a1a; margin: 0; }
+    h1 { font-size: 0.95rem; font-weight: 600; margin: 0 0 12px; }
+    .stat { font-size: 0.8rem; color: #374151; margin-bottom: 4px; }
+    .stat span { font-weight: 500; color: #111; }
+    .error { color: #dc2626; font-size: 0.78rem; margin-top: 8px; word-break: break-word; }
+    .actions { display: flex; gap: 8px; margin-top: 14px; }
+    button { flex: 1; padding: 7px 0; border: none; border-radius: 6px; font-size: 0.8rem; font-weight: 500; cursor: pointer; }
+    #syncBtn { background: #3b82f6; color: white; }
+    #syncBtn:hover { background: #2563eb; }
+    #syncBtn:disabled { background: #93c5fd; cursor: not-allowed; }
+    #optionsBtn { background: #f3f4f6; color: #374151; }
+    #optionsBtn:hover { background: #e5e7eb; }
+    .browser-badge { display: inline-block; font-size: 0.7rem; padding: 2px 7px; border-radius: 99px; background: #fef3c7; color: #92400e; margin-bottom: 10px; }
+    .browser-badge.chrome { background: #dbeafe; color: #1e40af; }
+  </style>
+</head>
+<body>
+  <h1>Social Archive Sync</h1>
+  <div id="browserBadge" class="browser-badge">detecting…</div>
+
+  <div class="stat">Last sync: <span id="lastSync">never</span></div>
+  <div class="stat">Inserted: <span id="inserted">—</span></div>
+  <div class="stat">Skipped: <span id="skipped">—</span></div>
+  <div id="errorMsg" class="error"></div>
+
+  <div class="actions">
+    <button id="syncBtn">Sync now</button>
+    <button id="optionsBtn">Options</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

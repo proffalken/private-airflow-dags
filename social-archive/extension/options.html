@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Social Archive Sync — Options</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }
+    h1 { font-size: 1.2rem; margin-bottom: 1.5rem; }
+    label { display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 4px; color: #374151; }
+    input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 0.875rem; margin-bottom: 16px; }
+    input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.2); }
+    button { padding: 9px 20px; background: #3b82f6; color: white; border: none; border-radius: 6px; font-size: 0.875rem; font-weight: 500; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    #status { margin-top: 12px; font-size: 0.8rem; color: #16a34a; min-height: 1.2em; }
+    #status.error { color: #dc2626; }
+    .hint { font-size: 0.75rem; color: #6b7280; margin-top: -12px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Social Archive Sync — Options</h1>
+
+  <label for="backendUrl">Backend URL</label>
+  <input id="backendUrl" type="url" placeholder="https://social-archive.wallace.network" />
+
+  <label for="username">Username</label>
+  <input id="username" type="text" autocomplete="username" />
+
+  <label for="password">Password</label>
+  <input id="password" type="password" autocomplete="current-password" />
+
+  <label for="syncInterval">Sync interval (minutes)</label>
+  <input id="syncInterval" type="number" min="10" max="1440" value="60" />
+  <p class="hint">Minimum 10 minutes. Changes take effect after saving.</p>
+
+  <button id="save">Save & reschedule</button>
+  <div id="status"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

@@ -3,7 +3,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..database import get_db
-from ..models import EditRequest, FlagRequest, ItemResponse, ItemsResponse
+from ..models import BookmarkSyncRequest, BookmarkSyncResponse, EditRequest, FlagRequest, ItemResponse, ItemsResponse
 from .auth import get_current_user
 
 router = APIRouter()
@@ -142,6 +142,41 @@ async def flag_item(
     if not row:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": item_id, "flagged_for_deletion": body.flagged_for_deletion}
+
+
+@router.post("/api/bookmarks/sync", response_model=BookmarkSyncResponse)
+async def sync_bookmarks(
+    body: BookmarkSyncRequest,
+    db=Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    """Bulk-upsert bookmarks from a browser extension. Deduplicates by URI."""
+    if not body.bookmarks:
+        return BookmarkSyncResponse(inserted=0, skipped=0)
+
+    uris = [b.uri for b in body.bookmarks]
+
+    async with db.cursor() as cur:
+        await cur.execute("SELECT uri FROM saved_items WHERE uri = ANY(%s)", (uris,))
+        existing = {r[0] for r in await cur.fetchall()}
+
+    new_items = [b for b in body.bookmarks if b.uri not in existing]
+
+    if new_items:
+        async with db.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO saved_items (source, source_context, type, title, uri, tags, saved_at)
+                VALUES (%s, %s, 'bookmark', %s, %s, %s, NOW())
+                """,
+                [
+                    (b.source, b.source_context, b.title, b.uri, b.tags)
+                    for b in new_items
+                ],
+            )
+        await db.commit()
+
+    return BookmarkSyncResponse(inserted=len(new_items), skipped=len(body.bookmarks) - len(new_items))
 
 
 TimeEstimate = Literal["quick", "afternoon", "full_day", "multi_day"]
