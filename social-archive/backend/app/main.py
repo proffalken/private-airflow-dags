@@ -27,6 +27,12 @@ async def _ensure_schema() -> None:
                 ALTER TABLE saved_items
                 ADD COLUMN IF NOT EXISTS flagged_for_deletion BOOLEAN NOT NULL DEFAULT FALSE
             """)
+            # Widen external_id to TEXT — original VARCHAR(50) is too short for URLs
+            # used as external IDs by the bookmark sync. Safe: widening never loses data.
+            await cur.execute("""
+                ALTER TABLE saved_items
+                ALTER COLUMN external_id TYPE text
+            """)
             await cur.execute("""
                 ALTER TABLE saved_items
                     ADD COLUMN IF NOT EXISTS time_estimate      VARCHAR(20),
