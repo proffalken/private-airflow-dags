@@ -39,6 +39,10 @@ async def _ensure_schema() -> None:
                     ADD COLUMN IF NOT EXISTS estimate_reasoning TEXT,
                     ADD COLUMN IF NOT EXISTS estimated_at       TIMESTAMPTZ
             """)
+            await cur.execute("""
+                ALTER TABLE saved_items
+                    ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ
+            """)
             # Seed default admin if no users exist
             await cur.execute("SELECT COUNT(*) FROM users")
             count = (await cur.fetchone())[0]

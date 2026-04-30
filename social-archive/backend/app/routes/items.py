@@ -21,7 +21,7 @@ async def list_items(
     db=Depends(get_db),
     _: str = Depends(get_current_user),
 ):
-    conditions: list[str] = []
+    conditions: list[str] = ["deleted_at IS NULL"]
     params: list = []
 
     if q:
@@ -90,7 +90,7 @@ async def list_source_contexts(
     async with db.cursor() as cur:
         await cur.execute(
             "SELECT DISTINCT source_context FROM saved_items"
-            " WHERE source_context IS NOT NULL ORDER BY source_context"
+            " WHERE source_context IS NOT NULL AND deleted_at IS NULL ORDER BY source_context"
         )
         rows = await cur.fetchall()
     return [r[0] for r in rows]
@@ -209,6 +209,7 @@ async def suggest_items(
             FROM saved_items
             WHERE time_estimate = %s
               AND flagged_for_deletion = FALSE
+              AND deleted_at IS NULL
             ORDER BY RANDOM()
             LIMIT %s
             """,

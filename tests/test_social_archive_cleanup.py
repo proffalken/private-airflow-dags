@@ -79,34 +79,63 @@ def _ti():
 # cleanup_bookmarks
 # ---------------------------------------------------------------------------
 
+def _mock_hook():
+    """Return a mock PostgresHook with a chain-accessible cursor."""
+    hook = MagicMock()
+    return hook
+
+
+def _run_cleanup_bookmarks(items):
+    """Call cleanup_bookmarks with a mocked DB and return (result, captured_ids)."""
+    hook = _mock_hook()
+    conn = hook.get_conn.return_value.__enter__.return_value
+    cur = conn.cursor.return_value.__enter__.return_value
+
+    with patch("social_archive_cleanup.PostgresHook", return_value=hook):
+        result = cleanup_bookmarks(items, _ti())
+
+    call = cur.execute.call_args
+    captured = sorted(call[0][1][0]) if call else []
+    return result, captured
+
+
 class TestCleanupBookmarks:
-    def test_returns_ids_for_brave_items(self):
+    def test_soft_deletes_brave_items(self):
         items = [_item(1, "brave"), _item(2, "reddit"), _item(3, "brave")]
-        result = cleanup_bookmarks(items, _ti())
-        assert sorted(result) == [1, 3]
+        result, updated_ids = _run_cleanup_bookmarks(items)
+        assert result == []           # never hard-deleted
+        assert updated_ids == [1, 3]  # soft-deleted via UPDATE
 
-    def test_returns_ids_for_chrome_items(self):
+    def test_soft_deletes_chrome_items(self):
         items = [_item(10, "chrome"), _item(11, "instagram")]
-        result = cleanup_bookmarks(items, _ti())
-        assert result == [10]
-
-    def test_mixed_brave_and_chrome(self):
-        items = [_item(1, "brave"), _item(2, "chrome"), _item(3, "github")]
-        result = cleanup_bookmarks(items, _ti())
-        assert sorted(result) == [1, 2]
-
-    def test_returns_empty_when_no_bookmarks(self):
-        items = [_item(1, "reddit"), _item(2, "youtube")]
-        result = cleanup_bookmarks(items, _ti())
+        result, updated_ids = _run_cleanup_bookmarks(items)
         assert result == []
+        assert updated_ids == [10]
+
+    def test_soft_deletes_mixed_brave_and_chrome(self):
+        items = [_item(1, "brave"), _item(2, "chrome"), _item(3, "github")]
+        result, updated_ids = _run_cleanup_bookmarks(items)
+        assert result == []
+        assert updated_ids == [1, 2]
+
+    def test_returns_empty_and_no_db_call_when_no_bookmarks(self):
+        hook = _mock_hook()
+        with patch("social_archive_cleanup.PostgresHook", return_value=hook):
+            result = cleanup_bookmarks([_item(1, "reddit")], _ti())
+        assert result == []
+        hook.get_conn.assert_not_called()
 
     def test_returns_empty_for_empty_input(self):
-        assert cleanup_bookmarks([], _ti()) == []
+        hook = _mock_hook()
+        with patch("social_archive_cleanup.PostgresHook", return_value=hook):
+            result = cleanup_bookmarks([], _ti())
+        assert result == []
+        hook.get_conn.assert_not_called()
 
-    def test_does_not_include_unknown_sources(self):
+    def test_does_not_soft_delete_unknown_sources(self):
         items = [_item(1, "twitter"), _item(2, "brave")]
-        result = cleanup_bookmarks(items, _ti())
-        assert result == [2]
+        result, updated_ids = _run_cleanup_bookmarks(items)
+        assert updated_ids == [2]
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +171,9 @@ class TestRemoveCleanedItemsFlattening:
     def test_flattens_all_source_lists(self):
         assert self._captured_ids([[1, 2], [3], [4, 5], [6]]) == [1, 2, 3, 4, 5, 6]
 
-    def test_includes_bookmark_ids(self):
-        # Simulate reddit=[1], instagram=[2], youtube=[3], github=[4], bookmarks=[5,6]
-        assert self._captured_ids([[1], [2], [3], [4], [5, 6]]) == [1, 2, 3, 4, 5, 6]
+    def test_bookmarks_return_empty_so_not_hard_deleted(self):
+        # cleanup_bookmarks returns [] — hard-delete list has only the other sources
+        assert self._captured_ids([[1], [2], [3], [4], []]) == [1, 2, 3, 4]
 
     def test_skips_delete_when_all_lists_empty(self):
         mock_hook = MagicMock()

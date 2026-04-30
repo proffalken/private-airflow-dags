@@ -57,7 +57,7 @@ def get_flagged_items(ti) -> list[dict]:
         hook = PostgresHook(postgres_conn_id="social_archive_db")
         rows = hook.get_records(
             "SELECT id, source, external_id, type "
-            "FROM saved_items WHERE flagged_for_deletion = true"
+            "FROM saved_items WHERE flagged_for_deletion = true AND deleted_at IS NULL"
         )
         items = [
             {"id": r[0], "source": r[1], "external_id": r[2], "type": r[3]}
@@ -492,10 +492,14 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
 
 @task
 def cleanup_bookmarks(flagged_items: list[dict], ti) -> list[int]:
-    """Return IDs of flagged browser-bookmark items so they are removed from the archive.
+    """Soft-delete flagged browser-bookmark items by setting deleted_at.
 
     Browser bookmarks (source 'brave' or 'chrome') have no external platform
-    to unsave from — deletion from the local archive is the only required action.
+    to unsave from. Rather than hard-deleting, we set deleted_at so the row
+    stays in the table — this prevents the sync endpoint from re-importing the
+    same URL on the next browser sync.
+
+    Returns an empty list so remove_cleaned_items skips them.
     """
     bookmark_sources = {"brave", "chrome"}
     bookmark_items = [i for i in flagged_items if i["source"] in bookmark_sources]
@@ -505,8 +509,17 @@ def cleanup_bookmarks(flagged_items: list[dict], ti) -> list[int]:
         return []
 
     ids = [item["id"] for item in bookmark_items]
-    logger.info(f"Bookmark cleanup: {len(ids)} items ready for archive removal")
-    return ids
+    hook = PostgresHook(postgres_conn_id="social_archive_db")
+    with hook.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE saved_items SET deleted_at = NOW() WHERE id = ANY(%s)",
+                (ids,),
+            )
+        conn.commit()
+
+    logger.info(f"Bookmark cleanup: soft-deleted {len(ids)} items")
+    return []
 
 
 @task

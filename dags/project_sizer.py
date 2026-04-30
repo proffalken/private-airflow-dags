@@ -131,8 +131,9 @@ def project_sizer():
                 cursor.execute("""
                     SELECT id, source, source_context, type, title, summary, tags, uri
                     FROM saved_items
-                    WHERE estimated_at IS NULL
-                       OR estimated_at < NOW() - INTERVAL '7 days'
+                    WHERE (estimated_at IS NULL OR estimated_at < NOW() - INTERVAL '7 days')
+                      AND flagged_for_deletion = FALSE
+                      AND deleted_at IS NULL
                     ORDER BY saved_at DESC
                 """)
                 rows = cursor.fetchall()
