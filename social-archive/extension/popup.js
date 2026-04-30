@@ -36,10 +36,15 @@ $('syncBtn').addEventListener('click', async () => {
 
   try {
     const result = await chrome.runtime.sendMessage({ type: 'SYNC_NOW' })
-    if (result?.status === 'error') {
+    console.log('[social-archive] sync result:', result)
+    if (!result) {
+      $('errorMsg').textContent = 'No response from service worker — try reloading the extension.'
+    } else if (result.status === 'error') {
       $('errorMsg').textContent = result.message
-    } else if (result?.status === 'unconfigured') {
+    } else if (result.status === 'unconfigured') {
       $('errorMsg').textContent = 'Not configured — open Options first.'
+    } else if (result.status === 'ok') {
+      $('errorMsg').textContent = `Done: ${result.inserted} inserted, ${result.skipped} skipped`
     }
     await refreshStatus()
   } catch (err) {
