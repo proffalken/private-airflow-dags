@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import timedelta
 import json
 import logging
 import re
@@ -423,7 +422,7 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
 # ---------------------------------------------------------------------------
 
 @dag(
-    schedule=timedelta(hours=24),
+    schedule=None,  # triggered exclusively by instagram_scheduler
     start_date=pendulum.datetime(2025, 8, 30, tz="UTC"),
     catchup=False,
 )
