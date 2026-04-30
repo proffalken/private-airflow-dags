@@ -55,6 +55,7 @@ def get_flagged_items(ti) -> list[dict]:
             description="Number of items flagged for deletion at the start of this cleanup run",
         )
         hook = PostgresHook(postgres_conn_id="social_archive_db")
+        hook.run("ALTER TABLE saved_items ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
         rows = hook.get_records(
             "SELECT id, source, external_id, type "
             "FROM saved_items WHERE flagged_for_deletion = true AND deleted_at IS NULL"
