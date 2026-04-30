@@ -491,6 +491,25 @@ def cleanup_github(flagged_items: list[dict], ti) -> list[int]:
 
 
 @task
+def cleanup_bookmarks(flagged_items: list[dict], ti) -> list[int]:
+    """Return IDs of flagged browser-bookmark items so they are removed from the archive.
+
+    Browser bookmarks (source 'brave' or 'chrome') have no external platform
+    to unsave from — deletion from the local archive is the only required action.
+    """
+    bookmark_sources = {"brave", "chrome"}
+    bookmark_items = [i for i in flagged_items if i["source"] in bookmark_sources]
+
+    if not bookmark_items:
+        logger.info("No browser bookmark items flagged for cleanup")
+        return []
+
+    ids = [item["id"] for item in bookmark_items]
+    logger.info(f"Bookmark cleanup: {len(ids)} items ready for archive removal")
+    return ids
+
+
+@task
 def remove_cleaned_items(cleaned_id_lists: list[list[int]], ti) -> None:
     """Delete successfully cleaned items from the archive database.
 
@@ -535,8 +554,9 @@ def social_archive_cleanup():
     instagram_cleaned = cleanup_instagram(flagged)
     youtube_cleaned = cleanup_youtube(flagged)
     github_cleaned = cleanup_github(flagged)
+    bookmark_cleaned = cleanup_bookmarks(flagged)
 
-    remove_cleaned_items([reddit_cleaned, instagram_cleaned, youtube_cleaned, github_cleaned])
+    remove_cleaned_items([reddit_cleaned, instagram_cleaned, youtube_cleaned, github_cleaned, bookmark_cleaned])
 
 
 social_archive_cleanup()
