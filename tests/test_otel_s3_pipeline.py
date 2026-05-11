@@ -112,11 +112,11 @@ def _make_mock_s3_response(metadata: dict, body: bytes) -> MagicMock:
     return mock_s3
 
 
-def test_get_creates_consumer_span_with_link(reset_otel):
+def test_get_creates_consumer_span_as_child(reset_otel):
+    """Consumer span is a child of the producer span — same trace ID."""
     _, exporter = reset_otel
-    from otel_s3_pipeline.s3_otel import s3_get_with_link
+    from otel_s3_pipeline.s3_otel import s3_get_with_context
 
-    # Produce an upstream context via a real producer span
     carrier: dict[str, str] = {}
     with trace.get_tracer("upstream").start_as_current_span("upstream.task") as span:
         propagate.inject(carrier)
@@ -125,7 +125,7 @@ def test_get_creates_consumer_span_with_link(reset_otel):
 
     mock_s3 = _make_mock_s3_response(carrier, b"payload")
     with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_s3):
-        result = s3_get_with_link("my-bucket", "prefix/obj.json")
+        result = s3_get_with_context("my-bucket", "prefix/obj.json")
 
     assert result == b"payload"
 
@@ -137,31 +137,32 @@ def test_get_creates_consumer_span_with_link(reset_otel):
     assert span.attributes["messaging.system"] == "aws_s3"
     assert span.attributes["messaging.source.name"] == "my-bucket"
 
-    assert len(span.links) == 1, "consumer span must link to the producer trace"
-    assert span.links[0].context.trace_id == upstream_trace_id
-    assert span.links[0].attributes["messaging.s3.key"] == "prefix/obj.json"
+    # Parent-child: consumer shares the producer's trace ID
+    assert span.context.trace_id == upstream_trace_id, \
+        "consumer span must be in the same trace as the producer"
+    assert span.links == (), "no span links — the connection is via parent context"
 
 
-def test_get_no_link_when_metadata_absent(reset_otel):
-    """Objects with no traceparent are handled gracefully (no link, no crash)."""
+def test_get_new_root_when_metadata_absent(reset_otel):
+    """Objects with no traceparent produce a new root span, not a crash."""
     _, exporter = reset_otel
-    from otel_s3_pipeline.s3_otel import s3_get_with_link
+    from otel_s3_pipeline.s3_otel import s3_get_with_context
 
     mock_s3 = _make_mock_s3_response({}, b"legacy data")
     with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_s3):
-        result = s3_get_with_link("my-bucket", "old-key.json")
+        result = s3_get_with_context("my-bucket", "old-key.json")
 
     assert result == b"legacy data"
     spans = exporter.get_finished_spans()
-    assert spans[0].links == ()
+    assert len(spans) == 1
+    assert spans[0].parent is None  # new root span — no parent
 
 
-def test_get_link_trace_id_matches_put(reset_otel):
-    """Round-trip: context injected by put is correctly extracted by get."""
+def test_get_trace_id_matches_put(reset_otel):
+    """Round-trip: consumer span shares the producer's trace ID."""
     _, exporter = reset_otel
-    from otel_s3_pipeline.s3_otel import s3_put_with_context, s3_get_with_link
+    from otel_s3_pipeline.s3_otel import s3_put_with_context, s3_get_with_context
 
-    # Capture whatever metadata the producer writes
     written_carrier: dict[str, str] = {}
     mock_put_s3 = MagicMock()
     mock_put_s3.put_object.side_effect = lambda **kwargs: written_carrier.update(
@@ -177,8 +178,8 @@ def test_get_link_trace_id_matches_put(reset_otel):
 
     mock_get_s3 = _make_mock_s3_response(written_carrier, b"data")
     with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_get_s3):
-        s3_get_with_link("bucket", "key.json")
+        s3_get_with_context("bucket", "key.json")
 
     consumer_span = exporter.get_finished_spans()[0]
-    assert len(consumer_span.links) == 1
-    assert consumer_span.links[0].context.trace_id == producer_trace_id
+    assert consumer_span.context.trace_id == producer_trace_id
+    assert consumer_span.links == ()

@@ -95,16 +95,16 @@ def s3_put_with_context(bucket: str, key: str, body: bytes, **put_kwargs) -> Non
         )
 
 
-def s3_get_with_link(bucket: str, key: str) -> bytes:
-    """Download from S3, linking this trace back to the producer's trace.
+def s3_get_with_context(bucket: str, key: str) -> bytes:
+    """Download from S3, continuing the producer's trace as a CONSUMER child span.
 
-    Creates a CONSUMER span with a span link pointing at the producer's span
-    context (read from the object's 'traceparent' metadata).  Call this inside
-    an instrument_task_context block so the span inherits the correct service.name.
+    Extracts the W3C traceparent from the object's metadata and uses it as the
+    parent context for the CONSUMER span.  Both DAG runs share the same trace ID,
+    which gives Dash0 the connected path it needs to render a straight service map
+    edge:  upload_to_s3 → aws_s3 → download_from_s3
 
-    Result in Dash0:
-      - Service map: edge from S3 bucket node to this task's service
-      - Trace detail: navigable "linked trace" button to the producer run
+    If no traceparent is present in the metadata (e.g. the object was uploaded
+    without OTEL instrumentation) the CONSUMER span starts a new root trace.
     """
     response = _s3_client().get_object(Bucket=bucket, Key=key)
     metadata = response.get("Metadata", {})
@@ -112,24 +112,23 @@ def s3_get_with_link(bucket: str, key: str) -> bytes:
     upstream_ctx = propagate.extract(metadata)
     upstream_span_ctx = trace.get_current_span(upstream_ctx).get_span_context()
 
-    links: list[trace.Link] = []
     if upstream_span_ctx.is_valid:
-        links = [trace.Link(upstream_span_ctx, attributes={"messaging.s3.key": key})]
         log.info(
-            "s3_get_with_link: linked to upstream trace %032x", upstream_span_ctx.trace_id
+            "s3_get_with_context: continuing trace %032x from s3://%s/%s",
+            upstream_span_ctx.trace_id, bucket, key,
         )
     else:
         log.warning(
-            "s3_get_with_link: no valid traceparent in metadata for s3://%s/%s — "
-            "consumer span will have no upstream link",
+            "s3_get_with_context: no valid traceparent in metadata for s3://%s/%s — "
+            "starting a new root span",
             bucket, key,
         )
 
     tracer = _get_tracer()
     with tracer.start_as_current_span(
         "s3.get_object",
+        context=upstream_ctx,        # parent-child: same trace ID as producer
         kind=trace.SpanKind.CONSUMER,
-        links=links,
         attributes={
             "messaging.system": "aws_s3",
             "messaging.source.name": bucket,
@@ -139,7 +138,7 @@ def s3_get_with_link(bucket: str, key: str) -> bytes:
         body = response["Body"].read()
         span_ctx = trace.get_current_span().get_span_context()
         log.info(
-            "s3_get_with_link: s3://%s/%s  trace_id=%032x  linked=%s",
-            bucket, key, span_ctx.trace_id, bool(links),
+            "s3_get_with_context: s3://%s/%s  trace_id=%032x",
+            bucket, key, span_ctx.trace_id,
         )
         return body

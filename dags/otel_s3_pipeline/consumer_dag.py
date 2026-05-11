@@ -39,14 +39,14 @@ def s3_otel_consumer():
     @task
     def download_from_s3(**context) -> dict:
         from airflow_otel import instrument_task_context
-        from otel_s3_pipeline.s3_otel import s3_get_with_link
+        from otel_s3_pipeline.s3_otel import s3_get_with_context
 
         conf = context["dag_run"].conf or {}
         bucket = conf.get("s3_bucket") or Variable.get("S3_BUCKET")
         key = conf["s3_key"]
 
         with instrument_task_context({}):
-            raw = s3_get_with_link(bucket, key)
+            raw = s3_get_with_context(bucket, key)
 
         log.info("Downloaded %d bytes from s3://%s/%s", len(raw), bucket, key)
         return json.loads(raw)
