@@ -38,18 +38,63 @@ def s3_otel_consumer():
 
     @task
     def download_from_s3(**context) -> dict:
-        from airflow_otel import instrument_task_context
-        from otel_s3_pipeline.s3_otel import s3_get_with_context
+        from airflow_otel._context import extract_airflow_context
+        from airflow_otel._instrumentation import get_tracer, setup_otel, shutdown_otel
+        from airflow_otel._propagation import push_current_context
+        from opentelemetry import propagate
+        from opentelemetry.trace import SpanKind, StatusCode
+        from otel_s3_pipeline.s3_otel import _s3_client
+
+        ctx_attrs = extract_airflow_context(context)
+        dag_id = ctx_attrs.get("dag_id", "s3_otel_consumer")
+        task_id = ctx_attrs.get("task_id", "download_from_s3")
+        run_id = ctx_attrs.get("run_id", "unknown")
+        try_number = int(ctx_attrs.get("try_number", 1))
 
         conf = context["dag_run"].conf or {}
         bucket = conf.get("s3_bucket") or Variable.get("S3_BUCKET")
         key = conf["s3_key"]
 
-        with instrument_task_context({}):
-            raw = s3_get_with_context(bucket, key)
+        # Fetch S3 object and extract the producer's traceparent BEFORE calling
+        # setup_otel, so we can use it as the parent for our root task span.
+        # instrument_task_context can't do this because it reads parent context
+        # from within-DAG XCom only, not from S3 metadata.
+        response = _s3_client().get_object(Bucket=bucket, Key=key)
+        metadata = response.get("Metadata", {})
+        body_bytes = response["Body"].read()
+        upstream_ctx = propagate.extract(metadata)
 
-        log.info("Downloaded %d bytes from s3://%s/%s", len(raw), bucket, key)
-        return json.loads(raw)
+        setup_otel(dag_id, task_id, run_id, try_number)
+        tracer = get_tracer(__name__)
+
+        try:
+            with tracer.start_as_current_span(
+                f"{dag_id}.{task_id}",
+                context=upstream_ctx,     # parent = producer's s3.put_object span
+                kind=SpanKind.CONSUMER,
+                attributes={
+                    "airflow.dag_id": dag_id,
+                    "airflow.task_id": task_id,
+                    "airflow.run_id": run_id,
+                    "airflow.try_number": try_number,
+                    "messaging.system": "aws_s3",
+                    "messaging.source.name": bucket,
+                    "messaging.s3.key": key,
+                },
+            ) as span:
+                # Push traceparent to XCom so process_payload connects via
+                # instrument_task_context's extract_upstream_context.
+                push_current_context(ctx_attrs)
+                span.set_status(StatusCode.OK)
+                log.info(
+                    "Downloaded %d bytes from s3://%s/%s", len(body_bytes), bucket, key
+                )
+                return json.loads(body_bytes)
+        except Exception as exc:
+            span.set_status(StatusCode.ERROR, str(exc))
+            raise
+        finally:
+            shutdown_otel()
 
     @task
     def process_payload(payload: dict) -> None:
