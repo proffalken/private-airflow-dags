@@ -23,7 +23,8 @@ from opentelemetry import propagate, trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.trace import ProxyTracerProvider
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 log = logging.getLogger(__name__)
@@ -42,16 +43,30 @@ def init_otel(service_name: str) -> None:
     if _initialized:
         return
 
-    provider = TracerProvider(
-        resource=Resource.create({"service.name": service_name})
-    )
-    provider.add_span_processor(
-        BatchSpanProcessor(OTLPSpanExporter())  # endpoint from env var
-    )
-    trace.set_tracer_provider(provider)
+    current = trace.get_tracer_provider()
+    if isinstance(current, ProxyTracerProvider):
+        # No real provider yet — install our own.  SimpleSpanProcessor exports
+        # synchronously, which is essential in short-lived Airflow task processes
+        # where BatchSpanProcessor may not flush its queue before the process exits.
+        provider = TracerProvider(
+            resource=Resource.create({"service.name": service_name})
+        )
+        provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter()))
+        trace.set_tracer_provider(provider)
+        log.info("OTEL TracerProvider installed for service '%s'", service_name)
+    else:
+        # Airflow (or another framework) already installed a TracerProvider —
+        # the set-once guard prevents replacing it.  Spans will be emitted via
+        # the existing provider; service.name will reflect its resource, not ours.
+        log.warning(
+            "OTEL TracerProvider already active (%s); cannot set service.name='%s'. "
+            "Spans will appear under the existing provider's service name in Dash0.",
+            type(current).__name__,
+            service_name,
+        )
+
     propagate.set_global_textmap(TraceContextTextMapPropagator())
     _initialized = True
-    log.info("OTEL initialised for service '%s'", service_name)
 
 
 def _s3_client():
@@ -96,7 +111,11 @@ def s3_put_with_context(bucket: str, key: str, body: bytes, **put_kwargs) -> Non
             Metadata=carrier,
             **put_kwargs,
         )
-        log.info("s3_put_with_context: s3://%s/%s  carrier=%s", bucket, key, list(carrier))
+        span_ctx = trace.get_current_span().get_span_context()
+        log.info(
+            "s3_put_with_context: s3://%s/%s  trace_id=%032x  carrier_keys=%s",
+            bucket, key, span_ctx.trace_id, list(carrier),
+        )
 
 
 def s3_get_with_link(bucket: str, key: str) -> bytes:
@@ -139,4 +158,10 @@ def s3_get_with_link(bucket: str, key: str) -> bytes:
             "messaging.s3.key": key,
         },
     ):
-        return response["Body"].read()
+        body = response["Body"].read()
+        span_ctx = trace.get_current_span().get_span_context()
+        log.info(
+            "s3_get_with_link: s3://%s/%s  trace_id=%032x  linked=%s",
+            bucket, key, span_ctx.trace_id, bool(links),
+        )
+        return body
