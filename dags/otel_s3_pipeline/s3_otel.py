@@ -29,6 +29,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 log = logging.getLogger(__name__)
 
 GARAGE_ENDPOINT = os.getenv("GARAGE_S3_ENDPOINT", "https://s3.wallace.network")
+GARAGE_S3_CONN_ID = os.getenv("GARAGE_S3_CONN_ID", "garage_s3")
 
 # Module-level flag: each Airflow task worker runs in its own process, so this
 # resets to False for every new task — exactly the behaviour we want.
@@ -53,8 +54,18 @@ def init_otel(service_name: str) -> None:
     log.info("OTEL initialised for service '%s'", service_name)
 
 
-def _s3_client() -> boto3.client:
-    return boto3.client("s3", endpoint_url=GARAGE_ENDPOINT)
+def _s3_client():
+    # Inside Airflow workers the credentials live in the 'garage_s3' connection,
+    # which also carries the endpoint_url in its extra JSON field.  AwsBaseHook
+    # wires all of that into the boto3 client automatically.
+    # Outside Airflow (local dev / tests) fall back to the standard boto3
+    # credential chain with the endpoint set via env var.
+    try:
+        from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
+        hook = AwsBaseHook(aws_conn_id=GARAGE_S3_CONN_ID, client_type="s3")
+        return hook.get_client_type()
+    except ImportError:
+        return boto3.client("s3", endpoint_url=GARAGE_ENDPOINT)
 
 
 def s3_put_with_context(bucket: str, key: str, body: bytes, **put_kwargs) -> None:
