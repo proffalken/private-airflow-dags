@@ -43,7 +43,7 @@ def s3_otel_consumer():
         bucket = conf.get("s3_bucket") or Variable.get("S3_BUCKET")
         key = conf["s3_key"]
 
-        service_name = Variable.get("OTEL_SERVICE_NAME", default_var="s3-otel-consumer")
+        service_name = Variable.get("OTEL_SERVICE_NAME", default="s3-otel-consumer")
         init_otel(service_name)
 
         raw = s3_get_with_link(bucket, key)

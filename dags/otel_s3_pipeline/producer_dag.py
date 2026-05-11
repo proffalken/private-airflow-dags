@@ -46,7 +46,7 @@ def s3_otel_producer():
     def upload_to_s3(payload: dict, **context) -> str:
         from otel_s3_pipeline.s3_otel import init_otel, s3_put_with_context
 
-        service_name = Variable.get("OTEL_SERVICE_NAME", default_var="s3-otel-producer")
+        service_name = Variable.get("OTEL_SERVICE_NAME", default="s3-otel-producer")
         bucket = Variable.get("S3_BUCKET")
         key = S3_KEY_TEMPLATE.format(
             ds=context["ds"],
