@@ -1,14 +1,15 @@
 """S3 OTEL Producer DAG.
 
 Generates a payload, uploads it to Garage S3 with a W3C traceparent injected
-into the object metadata, then triggers the consumer DAG with the S3 key so
-it can pick up exactly the right object.
+into the object metadata, then triggers the consumer DAG with the S3 key.
+
+Each task is wrapped with instrument_task_context so it appears as its own
+named service in the Dash0 service map:
+  service.name      = task_id   (e.g. "upload_to_s3")
+  service.namespace = dag_id    (e.g. "s3_otel_producer")
 
 Required Airflow Variables (Admin → Variables):
-  S3_BUCKET           — target bucket name in Garage
-
-Optional Airflow Variables:
-  OTEL_SERVICE_NAME   — override service name (default: "s3-otel-producer")
+  S3_BUCKET  — target bucket name in Garage (use "airflow-staging")
 """
 from __future__ import annotations
 
@@ -36,30 +37,29 @@ def s3_otel_producer():
 
     @task
     def generate_payload(**context) -> dict:
-        return {
-            "run_id": context["run_id"],
-            "logical_date": context["logical_date"].isoformat(),
-            "value": 42,
-        }
+        from airflow_otel import instrument_task_context
+        with instrument_task_context({}):
+            return {
+                "run_id": context["run_id"],
+                "logical_date": context["logical_date"].isoformat(),
+                "value": 42,
+            }
 
     @task
     def upload_to_s3(payload: dict, **context) -> str:
-        from otel_s3_pipeline.s3_otel import init_otel, s3_put_with_context
+        from airflow_otel import instrument_task_context
+        from otel_s3_pipeline.s3_otel import s3_put_with_context
 
-        service_name = Variable.get("OTEL_SERVICE_NAME", default="s3-otel-producer")
         bucket = Variable.get("S3_BUCKET")
-        key = S3_KEY_TEMPLATE.format(
-            ds=context["ds"],
-            run_id=context["run_id"],
-        )
+        key = S3_KEY_TEMPLATE.format(ds=context["ds"], run_id=context["run_id"])
 
-        init_otel(service_name)
-        s3_put_with_context(
-            bucket,
-            key,
-            json.dumps(payload).encode(),
-            ContentType="application/json",
-        )
+        with instrument_task_context({}):
+            s3_put_with_context(
+                bucket,
+                key,
+                json.dumps(payload).encode(),
+                ContentType="application/json",
+            )
         log.info("Uploaded payload to s3://%s/%s", bucket, key)
         return key
 
@@ -70,7 +70,6 @@ def s3_otel_producer():
         task_id="trigger_consumer",
         trigger_dag_id="s3_otel_consumer",
         wait_for_completion=False,
-        # conf is a template_field; ti.xcom_pull pulls the key emitted above
         conf={
             "s3_bucket": "{{ var.value.S3_BUCKET }}",
             "s3_key": "{{ ti.xcom_pull(task_ids='upload_to_s3') }}",

@@ -1,8 +1,8 @@
 """Tests for the S3 OTEL context propagation utilities."""
 from __future__ import annotations
 
-import sys
 import os
+import sys
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -18,8 +18,6 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 import opentelemetry.trace as _trace_module
 
-import otel_s3_pipeline.s3_otel as s3_otel_mod
-
 
 def _reset_otel_global():
     """Reset OTel's set-once provider guard so tests can install fresh providers."""
@@ -29,9 +27,16 @@ def _reset_otel_global():
 
 @pytest.fixture(autouse=True)
 def reset_otel():
-    """Reset OTEL global state and the module-level init flag before each test."""
-    s3_otel_mod._initialized = False
+    """Install a fresh in-memory TracerProvider before each test."""
     _reset_otel_global()
+
+    # Also reset airflow_otel's module-level provider if the package is installed,
+    # so _get_tracer() falls back to the global provider we control here.
+    try:
+        import airflow_otel._instrumentation as _ao
+        _ao._tracer_provider = None
+    except ImportError:
+        pass
 
     provider = TracerProvider()
     exporter = InMemorySpanExporter()
@@ -42,33 +47,7 @@ def reset_otel():
     yield provider, exporter
 
     exporter.clear()
-    s3_otel_mod._initialized = False
     _reset_otel_global()
-
-
-# ---------------------------------------------------------------------------
-# init_otel
-# ---------------------------------------------------------------------------
-
-
-def test_init_otel_sets_tracer_provider(reset_otel):
-    # Override with a fresh real provider (no exporter needed here)
-    trace.set_tracer_provider(trace.ProxyTracerProvider())
-    s3_otel_mod._initialized = False
-
-    with patch("otel_s3_pipeline.s3_otel.OTLPSpanExporter"):
-        s3_otel_mod.init_otel("test-service")
-
-    assert isinstance(trace.get_tracer_provider(), TracerProvider)
-    assert s3_otel_mod._initialized is True
-
-
-def test_init_otel_is_idempotent(reset_otel):
-    s3_otel_mod._initialized = True  # pretend already initialised
-
-    with patch("otel_s3_pipeline.s3_otel.TracerProvider") as mock_provider_cls:
-        s3_otel_mod.init_otel("test-service")
-        mock_provider_cls.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +56,11 @@ def test_init_otel_is_idempotent(reset_otel):
 
 
 def test_put_injects_traceparent(reset_otel):
-    mock_s3 = MagicMock()
+    from otel_s3_pipeline.s3_otel import s3_put_with_context
 
-    with patch.object(s3_otel_mod, "_s3_client", return_value=mock_s3):
-        s3_otel_mod.s3_put_with_context("my-bucket", "prefix/obj.json", b'{"x":1}')
+    mock_s3 = MagicMock()
+    with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_s3):
+        s3_put_with_context("my-bucket", "prefix/obj.json", b'{"x":1}')
 
     call_kwargs = mock_s3.put_object.call_args[1]
     assert "traceparent" in call_kwargs["Metadata"], "traceparent must be in S3 metadata"
@@ -89,10 +69,11 @@ def test_put_injects_traceparent(reset_otel):
 
 def test_put_emits_producer_span(reset_otel):
     _, exporter = reset_otel
-    mock_s3 = MagicMock()
+    from otel_s3_pipeline.s3_otel import s3_put_with_context
 
-    with patch.object(s3_otel_mod, "_s3_client", return_value=mock_s3):
-        s3_otel_mod.s3_put_with_context("my-bucket", "prefix/obj.json", b"data")
+    mock_s3 = MagicMock()
+    with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_s3):
+        s3_put_with_context("my-bucket", "prefix/obj.json", b"data")
 
     spans = exporter.get_finished_spans()
     assert len(spans) == 1
@@ -105,10 +86,11 @@ def test_put_emits_producer_span(reset_otel):
 
 
 def test_put_passes_extra_kwargs(reset_otel):
-    mock_s3 = MagicMock()
+    from otel_s3_pipeline.s3_otel import s3_put_with_context
 
-    with patch.object(s3_otel_mod, "_s3_client", return_value=mock_s3):
-        s3_otel_mod.s3_put_with_context(
+    mock_s3 = MagicMock()
+    with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_s3):
+        s3_put_with_context(
             "my-bucket", "obj.json", b"data", ContentType="application/json"
         )
 
@@ -132,6 +114,7 @@ def _make_mock_s3_response(metadata: dict, body: bytes) -> MagicMock:
 
 def test_get_creates_consumer_span_with_link(reset_otel):
     _, exporter = reset_otel
+    from otel_s3_pipeline.s3_otel import s3_get_with_link
 
     # Produce an upstream context via a real producer span
     carrier: dict[str, str] = {}
@@ -141,9 +124,8 @@ def test_get_creates_consumer_span_with_link(reset_otel):
     exporter.clear()
 
     mock_s3 = _make_mock_s3_response(carrier, b"payload")
-
-    with patch.object(s3_otel_mod, "_s3_client", return_value=mock_s3):
-        result = s3_otel_mod.s3_get_with_link("my-bucket", "prefix/obj.json")
+    with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_s3):
+        result = s3_get_with_link("my-bucket", "prefix/obj.json")
 
     assert result == b"payload"
 
@@ -163,10 +145,11 @@ def test_get_creates_consumer_span_with_link(reset_otel):
 def test_get_no_link_when_metadata_absent(reset_otel):
     """Objects with no traceparent are handled gracefully (no link, no crash)."""
     _, exporter = reset_otel
-    mock_s3 = _make_mock_s3_response({}, b"legacy data")
+    from otel_s3_pipeline.s3_otel import s3_get_with_link
 
-    with patch.object(s3_otel_mod, "_s3_client", return_value=mock_s3):
-        result = s3_otel_mod.s3_get_with_link("my-bucket", "old-key.json")
+    mock_s3 = _make_mock_s3_response({}, b"legacy data")
+    with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_s3):
+        result = s3_get_with_link("my-bucket", "old-key.json")
 
     assert result == b"legacy data"
     spans = exporter.get_finished_spans()
@@ -176,27 +159,25 @@ def test_get_no_link_when_metadata_absent(reset_otel):
 def test_get_link_trace_id_matches_put(reset_otel):
     """Round-trip: context injected by put is correctly extracted by get."""
     _, exporter = reset_otel
+    from otel_s3_pipeline.s3_otel import s3_put_with_context, s3_get_with_link
 
-    # Simulate a producer writing context into S3 metadata
+    # Capture whatever metadata the producer writes
     written_carrier: dict[str, str] = {}
-
     mock_put_s3 = MagicMock()
     mock_put_s3.put_object.side_effect = lambda **kwargs: written_carrier.update(
         kwargs.get("Metadata", {})
     )
 
-    with patch.object(s3_otel_mod, "_s3_client", return_value=mock_put_s3):
-        s3_otel_mod.s3_put_with_context("bucket", "key.json", b"data")
+    with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_put_s3):
+        s3_put_with_context("bucket", "key.json", b"data")
 
     producer_span = exporter.get_finished_spans()[0]
     producer_trace_id = producer_span.context.trace_id
     exporter.clear()
 
-    # Simulate a consumer reading that metadata
     mock_get_s3 = _make_mock_s3_response(written_carrier, b"data")
-
-    with patch.object(s3_otel_mod, "_s3_client", return_value=mock_get_s3):
-        s3_otel_mod.s3_get_with_link("bucket", "key.json")
+    with patch("otel_s3_pipeline.s3_otel._s3_client", return_value=mock_get_s3):
+        s3_get_with_link("bucket", "key.json")
 
     consumer_span = exporter.get_finished_spans()[0]
     assert len(consumer_span.links) == 1
