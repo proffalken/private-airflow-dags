@@ -39,6 +39,23 @@ def _row_to_item(r) -> ItemResponse:
     )
 
 
+@router.get("/api/items/{item_id}", response_model=ItemResponse)
+async def get_item(
+    item_id: int,
+    db=Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    async with db.cursor() as cur:
+        await cur.execute(
+            f"SELECT {_ITEM_COLS} FROM saved_items WHERE id = %s AND deleted_at IS NULL",
+            (item_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return _row_to_item(row)
+
+
 @router.get("/api/items", response_model=ItemsResponse)
 async def list_items(
     q: Optional[str] = None,

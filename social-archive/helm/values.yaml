@@ -38,3 +38,7 @@ frontend:
 ingress:
   host: social-archive.wallace.network
   tlsSecret: social-archive-tls
+  # API subdomain — exposes the FastAPI backend directly for MCP / programmatic access.
+  # Bearer token auth; obtain a token via POST /auth/login.
+  apiHost: api.social-archive.wallace.network
+  apiTlsSecret: social-archive-api-tls
