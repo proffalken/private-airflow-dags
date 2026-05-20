@@ -40,14 +40,25 @@ _SCRAPE_BODY_MAX = 8000  # chars stored in body column
 
 @task
 def find_pending() -> list[int]:
-    """Return IDs of browser-synced bookmarks that still need body scraping."""
+    """Return IDs of browser-synced bookmarks that still need body scraping.
+
+    Items with a scrape_error are excluded — they are permanently unreachable
+    (e.g. 404) and should not be retried or deleted.
+    """
     hook = PostgresHook(postgres_conn_id="social_archive_db")
     with hook.get_conn() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
+                ALTER TABLE saved_items
+                    ADD COLUMN IF NOT EXISTS scrape_error VARCHAR(50)
+            """)
+            conn.commit()
+
+            cursor.execute("""
                 SELECT id FROM saved_items
                 WHERE type = 'bookmark'
                   AND (body IS NULL OR body = '')
+                  AND scrape_error IS NULL
                   AND flagged_for_deletion = FALSE
                   AND deleted_at IS NULL
                 ORDER BY saved_at DESC
@@ -137,6 +148,9 @@ def scrape_bodies(pending_ids: list[int], ti) -> list[int]:
                         failed_counter.add(1)
                         continue
 
+                    scrape_error: str | None = None
+                    body = ""
+
                     with otel_task_tracer.start_child_span(span_name="scrape_url") as sc_span:
                         sc_span.set_attribute("url", url[:200])
                         try:
@@ -166,11 +180,33 @@ def scrape_bodies(pending_ids: list[int], ti) -> list[int]:
                                 body = extractor.get_text()
 
                             body = body[:_SCRAPE_BODY_MAX].strip()
+                        except _req.exceptions.HTTPError as exc:
+                            status = exc.response.status_code if exc.response is not None else 0
+                            if 400 <= status < 500:
+                                # Permanent client error (404, 403, 410…) — flag and skip forever
+                                scrape_error = f"http_{status}"
+                                logger.warning(
+                                    "Permanent HTTP %d for %s — flagging as %r",
+                                    status, url, scrape_error,
+                                )
+                            else:
+                                # 5xx or unknown — transient, will retry next run
+                                logger.warning("HTTP %d for %s — will retry", status, url)
+                            failed += 1
+                            failed_counter.add(1)
                         except Exception as exc:
+                            # Connection errors, timeouts etc. — transient, retry next run
                             logger.warning("Scrape failed for %s: %s", url, exc)
                             failed += 1
                             failed_counter.add(1)
-                            continue
+
+                    if scrape_error:
+                        cursor.execute(
+                            "UPDATE saved_items SET scrape_error = %s WHERE id = %s",
+                            (scrape_error, item["id"]),
+                        )
+                        conn.commit()
+                        continue
 
                     if not body:
                         logger.warning("No text extracted from %s — skipping", url)
