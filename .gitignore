@@ -48,3 +48,6 @@ logs/
 airflow.db
 airflow.cfg
 standalone_admin_password.txt
+
+# Claude Cowork session data
+.claude/

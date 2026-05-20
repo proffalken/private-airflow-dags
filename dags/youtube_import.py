@@ -18,7 +18,7 @@ from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import get_llm_client, instrument_llm, parse_llm_json, OLLAMA_MODEL
+from dag_utils import get_llm_client, instrument_llm, parse_llm_json, OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES
 
 logger = logging.getLogger("airflow.youtube_dag")
 
@@ -274,7 +274,7 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
 
                                 response = client.chat.completions.create(
                                     model=OLLAMA_MODEL,
-                                    max_tokens=512,
+                                    max_tokens=600,
                                     messages=[{
                                         "role": "user",
                                         "content": (
@@ -291,7 +291,8 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                                             f"broad category (e.g. 'python', 'jazz', 'recipe').\n"
                                             f"  4. Do NOT include the playlist name as a tag — "
                                             f"it will be added automatically.\n"
-                                            f'- "summary": a one-sentence summary\n\n'
+                                            f'- "summary": a one-sentence summary\n'
+                                            f"{CONTENT_TYPE_PROMPT_FRAGMENT}\n\n"
                                             f"{tag_hint}"
                                             f"Video:\n{content}\n\n"
                                             f"Respond with only valid JSON, no trailing commas."
@@ -309,11 +310,14 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                             ))
                             llm_span.set_attribute("item.tags", str(merged_tags))
 
+                            raw_ct = analysis.get("content_type", "other")
+                            content_type = raw_ct if raw_ct in CONTENT_TYPES else "other"
+
                             cursor.execute("""
                                 INSERT INTO saved_items
                                     (source, external_id, type, title, body,
-                                     uri, source_context, tags, summary)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                     uri, source_context, tags, summary, content_type)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (source, external_id) DO NOTHING
                             """, (
                                 "youtube",
@@ -325,6 +329,7 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                                 playlist_name,
                                 merged_tags,
                                 analysis.get("summary"),
+                                content_type,
                             ))
                             conn.commit()
                             inserted += cursor.rowcount

@@ -12,6 +12,22 @@ OLLAMA_BASE_URL = "http://ollama.ollama.svc.cluster.local:11434/v1"
 OLLAMA_NATIVE_URL = "http://ollama.ollama.svc.cluster.local:11434"
 OLLAMA_MODEL = "huihui_ai/qwen3-abliterated:4b"
 
+# Valid content_type values — must match CONTENT_TYPES in backend/app/routes/items.py
+CONTENT_TYPES = ["recipe", "project", "article", "reference", "tool", "other"]
+
+# Shared prompt fragment added to every import DAG's LLM call.
+# Keep this in sync with CONTENT_TYPES above.
+CONTENT_TYPE_PROMPT_FRAGMENT = """\
+- "content_type": exactly one of: recipe, project, article, reference, tool, other
+  RULES:
+  - recipe    → food or drink recipe (cooking instructions, ingredient lists)
+  - project   → something to make or build (DIY, electronics, craft, software project)
+  - reference → documentation, cheat-sheets, how-to guides kept for future lookup
+  - article   → written piece to read once (news, blog post, essay)
+  - tool      → software library, CLI app, framework, or service
+  - other     → anything that doesn't clearly fit the above\
+"""
+
 
 def get_llm_client():
     """Return an OpenAI-compatible client pointed at the local Ollama instance."""

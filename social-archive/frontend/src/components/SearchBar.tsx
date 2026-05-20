@@ -3,12 +3,28 @@
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useState } from 'react'
 
-export function SearchBar({ sourceContexts = [] }: { sourceContexts?: string[] }) {
+const CONTENT_TYPE_LABELS: Record<string, string> = {
+  recipe: '🍳 Recipe',
+  project: '🔧 Project',
+  article: '📄 Article',
+  reference: '📚 Reference',
+  tool: '🛠 Tool',
+  other: 'Other',
+}
+
+export function SearchBar({
+  sourceContexts = [],
+  contentTypes = [],
+}: {
+  sourceContexts?: string[]
+  contentTypes?: string[]
+}) {
   const router = useRouter()
   const searchParams = useSearchParams()
 
   const [q, setQ] = useState(searchParams.get('q') || '')
   const [sourceContext, setSourceContext] = useState(searchParams.get('source_context') || '')
+  const [contentType, setContentType] = useState(searchParams.get('content_type') || '')
   const [tags, setTags] = useState(searchParams.get('tags') || '')
   const [flagged, setFlagged] = useState(searchParams.get('flagged') || '')
 
@@ -17,6 +33,7 @@ export function SearchBar({ sourceContexts = [] }: { sourceContexts?: string[] }
     const params = new URLSearchParams()
     if (q) params.set('q', q)
     if (sourceContext) params.set('source_context', sourceContext)
+    if (contentType) params.set('content_type', contentType)
     if (tags) params.set('tags', tags)
     if (flagged) params.set('flagged', flagged)
     router.push(`/?${params.toString()}`)
@@ -25,6 +42,7 @@ export function SearchBar({ sourceContexts = [] }: { sourceContexts?: string[] }
   const handleReset = () => {
     setQ('')
     setSourceContext('')
+    setContentType('')
     setTags('')
     setFlagged('')
     router.push('/')
@@ -63,6 +81,16 @@ export function SearchBar({ sourceContexts = [] }: { sourceContexts?: string[] }
           <option value="">All sources</option>
           {sourceContexts.map(sc => (
             <option key={sc} value={sc}>{sc}</option>
+          ))}
+        </select>
+        <select
+          value={contentType}
+          onChange={e => setContentType(e.target.value)}
+          className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          <option value="">All types</option>
+          {contentTypes.map(ct => (
+            <option key={ct} value={ct}>{CONTENT_TYPE_LABELS[ct] ?? ct}</option>
           ))}
         </select>
         <input

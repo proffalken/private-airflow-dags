@@ -43,6 +43,13 @@ async def _ensure_schema() -> None:
                 ALTER TABLE saved_items
                     ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ
             """)
+            # Semantic content classification — enables LLM-driven workflows such as
+            # pushing recipes to Mealie or comparing projects against Gridstock inventory.
+            await cur.execute("""
+                ALTER TABLE saved_items
+                    ADD COLUMN IF NOT EXISTS content_type  VARCHAR(50),
+                    ADD COLUMN IF NOT EXISTS structured_data JSONB
+            """)
             # Seed default admin if no users exist
             await cur.execute("SELECT COUNT(*) FROM users")
             count = (await cur.fetchone())[0]

@@ -11,6 +11,7 @@ interface SearchParams {
   tags?: string
   source_context?: string
   type?: string
+  content_type?: string
   flagged?: string
   limit?: string
   offset?: string
@@ -27,6 +28,8 @@ interface Item {
   tags: string[]
   flagged_for_deletion: boolean
   saved_at: string | null
+  content_type: string | null
+  structured_data: Record<string, unknown> | null
 }
 
 interface ItemsResponse {
@@ -39,6 +42,19 @@ interface ItemsResponse {
 async function fetchSourceContexts(token: string): Promise<string[]> {
   try {
     const res = await fetch(`${BACKEND_URL}/api/source_contexts`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store',
+    })
+    if (!res.ok) return []
+    return res.json()
+  } catch {
+    return []
+  }
+}
+
+async function fetchContentTypes(token: string): Promise<string[]> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/content_types`, {
       headers: { Authorization: `Bearer ${token}` },
       cache: 'no-store',
     })
@@ -65,6 +81,7 @@ async function fetchItems(
   }
   if (params.source_context) url.searchParams.set('source_context', params.source_context)
   if (params.type) url.searchParams.set('type', params.type)
+  if (params.content_type) url.searchParams.set('content_type', params.content_type)
   if (params.flagged) url.searchParams.set('flagged', params.flagged)
   url.searchParams.set('limit', params.limit || '50')
   url.searchParams.set('offset', params.offset || '0')
@@ -90,9 +107,10 @@ export default async function Home({
   const token = cookieStore.get('token')?.value
   if (!token) redirect('/login')
 
-  const [data, sourceContexts] = await Promise.all([
+  const [data, sourceContexts, contentTypes] = await Promise.all([
     fetchItems(token, searchParams),
     fetchSourceContexts(token),
+    fetchContentTypes(token),
   ])
   if (!data) redirect('/login')
 
@@ -132,7 +150,7 @@ export default async function Home({
       </div>
 
       <Suspense>
-        <SearchBar sourceContexts={sourceContexts} />
+        <SearchBar sourceContexts={sourceContexts} contentTypes={contentTypes} />
       </Suspense>
 
       <div className="mt-6 space-y-3">

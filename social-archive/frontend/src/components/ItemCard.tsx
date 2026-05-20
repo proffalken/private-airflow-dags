@@ -3,6 +3,45 @@
 import { useState, useRef, useEffect } from 'react'
 import { flagItem, editItem } from '@/lib/api'
 
+// Matches CONTENT_TYPES in backend/app/routes/items.py
+const CONTENT_TYPE_LABELS: Record<string, string> = {
+  recipe: '🍳 Recipe',
+  project: '🔧 Project',
+  article: '📄 Article',
+  reference: '📚 Reference',
+  tool: '🛠 Tool',
+  other: 'Other',
+}
+
+const CONTENT_TYPE_COLORS: Record<string, string> = {
+  recipe: 'bg-orange-100 text-orange-700',
+  project: 'bg-purple-100 text-purple-700',
+  article: 'bg-green-100 text-green-700',
+  reference: 'bg-yellow-100 text-yellow-700',
+  tool: 'bg-cyan-100 text-cyan-700',
+  other: 'bg-gray-100 text-gray-600',
+}
+
+const ALL_CONTENT_TYPES = Object.keys(CONTENT_TYPE_LABELS)
+
+interface StructuredData {
+  // Recipe fields
+  ingredients?: string[]
+  steps?: string[]
+  servings?: number | string
+  cook_time?: string
+  prep_time?: string
+  dietary?: string[]
+  cuisine?: string
+  // Project fields
+  materials?: string[]
+  tools?: string[]
+  skills?: string[]
+  difficulty?: string
+  estimated_cost?: string
+  [key: string]: unknown
+}
+
 interface Item {
   id: number
   title: string | null
@@ -14,6 +53,122 @@ interface Item {
   tags: string[]
   flagged_for_deletion: boolean
   saved_at: string | null
+  content_type: string | null
+  structured_data: StructuredData | null
+}
+
+function RecipePanel({ data }: { data: StructuredData }) {
+  const [open, setOpen] = useState(false)
+  const hasDetail = (data.ingredients?.length ?? 0) > 0 || (data.steps?.length ?? 0) > 0
+
+  if (!hasDetail) return null
+
+  return (
+    <div className="mt-2 border border-orange-200 rounded-md overflow-hidden text-sm">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-3 py-1.5 bg-orange-50 text-orange-800 text-xs font-medium hover:bg-orange-100 transition-colors"
+      >
+        <span>Recipe details</span>
+        <span>{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="px-3 py-2 space-y-2 bg-white">
+          {(data.cuisine || data.servings || data.prep_time || data.cook_time) && (
+            <div className="flex gap-3 flex-wrap text-xs text-gray-600">
+              {data.cuisine && <span>🌍 {data.cuisine}</span>}
+              {data.servings && <span>🍽 {data.servings} servings</span>}
+              {data.prep_time && <span>⏱ prep {data.prep_time}</span>}
+              {data.cook_time && <span>🔥 cook {data.cook_time}</span>}
+            </div>
+          )}
+          {data.dietary && data.dietary.length > 0 && (
+            <div className="flex gap-1 flex-wrap">
+              {data.dietary.map(d => (
+                <span key={d} className="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded">{d}</span>
+              ))}
+            </div>
+          )}
+          {data.ingredients && data.ingredients.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-gray-700 mb-1">Ingredients</p>
+              <ul className="list-disc list-inside space-y-0.5">
+                {data.ingredients.map((ing, i) => (
+                  <li key={i} className="text-xs text-gray-600">{ing}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {data.steps && data.steps.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-gray-700 mb-1">Steps</p>
+              <ol className="list-decimal list-inside space-y-0.5">
+                {data.steps.map((step, i) => (
+                  <li key={i} className="text-xs text-gray-600">{step}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ProjectPanel({ data }: { data: StructuredData }) {
+  const [open, setOpen] = useState(false)
+  const hasDetail = (data.materials?.length ?? 0) > 0 || (data.tools?.length ?? 0) > 0
+
+  if (!hasDetail) return null
+
+  return (
+    <div className="mt-2 border border-purple-200 rounded-md overflow-hidden text-sm">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-3 py-1.5 bg-purple-50 text-purple-800 text-xs font-medium hover:bg-purple-100 transition-colors"
+      >
+        <span>Project details</span>
+        <span>{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="px-3 py-2 space-y-2 bg-white">
+          {(data.difficulty || data.estimated_cost) && (
+            <div className="flex gap-3 flex-wrap text-xs text-gray-600">
+              {data.difficulty && <span>📊 {data.difficulty}</span>}
+              {data.estimated_cost && <span>💰 {data.estimated_cost}</span>}
+            </div>
+          )}
+          {data.materials && data.materials.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-gray-700 mb-1">Materials</p>
+              <ul className="list-disc list-inside space-y-0.5">
+                {data.materials.map((m, i) => (
+                  <li key={i} className="text-xs text-gray-600">{m}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {data.tools && data.tools.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-gray-700 mb-1">Tools needed</p>
+              <ul className="list-disc list-inside space-y-0.5">
+                {data.tools.map((t, i) => (
+                  <li key={i} className="text-xs text-gray-600">{t}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {data.skills && data.skills.length > 0 && (
+            <div className="flex gap-1 flex-wrap">
+              {data.skills.map(s => (
+                <span key={s} className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded">{s}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function ItemCard({ item }: { item: Item }) {
@@ -31,6 +186,10 @@ export function ItemCard({ item }: { item: Item }) {
   const [editingTags, setEditingTags] = useState(false)
   const [tagsDraft, setTagsDraft] = useState(item.tags.join(', '))
   const tagsInputRef = useRef<HTMLInputElement>(null)
+
+  // Content type editing
+  const [contentType, setContentType] = useState(item.content_type ?? '')
+  const [editingContentType, setEditingContentType] = useState(false)
 
   useEffect(() => { if (editingTitle) titleInputRef.current?.focus() }, [editingTitle])
   useEffect(() => { if (editingTags) tagsInputRef.current?.focus() }, [editingTags])
@@ -87,6 +246,21 @@ export function ItemCard({ item }: { item: Item }) {
     setEditingTags(false)
   }
 
+  const saveContentType = async (newType: string) => {
+    setEditingContentType(false)
+    if (newType === contentType) return
+    const prev = contentType
+    setContentType(newType)
+    try {
+      await editItem(item.id, { content_type: newType || null } as Parameters<typeof editItem>[1])
+    } catch {
+      setContentType(prev)
+    }
+  }
+
+  const ctColor = CONTENT_TYPE_COLORS[contentType] ?? 'bg-gray-100 text-gray-600'
+  const ctLabel = CONTENT_TYPE_LABELS[contentType] ?? contentType
+
   return (
     <div
       className={`p-4 border rounded-lg transition-colors ${
@@ -103,6 +277,37 @@ export function ItemCard({ item }: { item: Item }) {
               <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
                 {item.type}
               </span>
+            )}
+            {/* Content type badge — inline editable */}
+            {editingContentType ? (
+              <select
+                value={contentType}
+                autoFocus
+                onChange={e => saveContentType(e.target.value)}
+                onBlur={() => setEditingContentType(false)}
+                className="text-xs border border-blue-400 rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="">— unclassified —</option>
+                {ALL_CONTENT_TYPES.map(ct => (
+                  <option key={ct} value={ct}>{CONTENT_TYPE_LABELS[ct]}</option>
+                ))}
+              </select>
+            ) : contentType ? (
+              <button
+                onClick={() => setEditingContentType(true)}
+                title="Click to change content type"
+                className={`text-xs px-2 py-0.5 rounded font-medium ${ctColor} hover:opacity-80 transition-opacity`}
+              >
+                {ctLabel}
+              </button>
+            ) : (
+              <button
+                onClick={() => setEditingContentType(true)}
+                title="Classify this item"
+                className="text-xs px-2 py-0.5 rounded text-gray-400 border border-dashed border-gray-300 hover:border-gray-400 hover:text-gray-500 transition-colors"
+              >
+                + classify
+              </button>
             )}
           </div>
 
@@ -144,6 +349,14 @@ export function ItemCard({ item }: { item: Item }) {
 
           {item.summary && !editingTitle && (
             <p className="text-sm text-gray-600 mt-1 line-clamp-2">{item.summary}</p>
+          )}
+
+          {/* Structured data panels — only shown when data is present */}
+          {contentType === 'recipe' && item.structured_data && (
+            <RecipePanel data={item.structured_data} />
+          )}
+          {contentType === 'project' && item.structured_data && (
+            <ProjectPanel data={item.structured_data} />
           )}
 
           <div className="flex items-center gap-3 mt-2 flex-wrap">

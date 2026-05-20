@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
@@ -31,6 +31,9 @@ class ItemResponse(BaseModel):
     saved_at: Optional[datetime] = None
     time_estimate: Optional[str] = None
     estimate_reasoning: Optional[str] = None
+    # Semantic fields populated by DAG classification + structure extraction
+    content_type: Optional[str] = None
+    structured_data: Optional[dict[str, Any]] = None
 
 
 class ItemsResponse(BaseModel):
@@ -47,6 +50,7 @@ class FlagRequest(BaseModel):
 class EditRequest(BaseModel):
     title: Optional[str] = None
     tags: Optional[list[str]] = None
+    content_type: Optional[str] = None
 
 
 class BookmarkItem(BaseModel):

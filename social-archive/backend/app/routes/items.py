@@ -8,6 +8,36 @@ from .auth import get_current_user
 
 router = APIRouter()
 
+# Columns returned by every item SELECT — keep in sync with _row_to_item()
+_ITEM_COLS = """
+    id, title, uri, body, source_context, type,
+    summary, tags, flagged_for_deletion, saved_at,
+    time_estimate, estimate_reasoning,
+    content_type, structured_data
+"""
+
+# Valid content_type values (also documented here for UI dropdowns)
+CONTENT_TYPES = ["recipe", "project", "article", "reference", "tool", "other"]
+
+
+def _row_to_item(r) -> ItemResponse:
+    return ItemResponse(
+        id=r[0],
+        title=r[1],
+        uri=r[2],
+        body=r[3],
+        source_context=r[4],
+        type=r[5],
+        summary=r[6],
+        tags=r[7] or [],
+        flagged_for_deletion=r[8] or False,
+        saved_at=r[9],
+        time_estimate=r[10],
+        estimate_reasoning=r[11],
+        content_type=r[12],
+        structured_data=r[13],
+    )
+
 
 @router.get("/api/items", response_model=ItemsResponse)
 async def list_items(
@@ -15,6 +45,7 @@ async def list_items(
     tags: list[str] = Query(default=[]),
     source_context: Optional[str] = None,
     type_filter: Optional[str] = Query(default=None, alias="type"),
+    content_type: Optional[str] = None,
     flagged: Optional[bool] = None,
     limit: int = Query(default=50, le=200),
     offset: int = 0,
@@ -39,6 +70,9 @@ async def list_items(
     if type_filter:
         conditions.append("type = %s")
         params.append(type_filter)
+    if content_type:
+        conditions.append("content_type = %s")
+        params.append(content_type)
     if flagged is not None:
         conditions.append("flagged_for_deletion = %s")
         params.append(flagged)
@@ -47,9 +81,7 @@ async def list_items(
 
     count_sql = f"SELECT COUNT(*) FROM saved_items {where}"
     data_sql = f"""
-        SELECT id, title, uri, body, source_context, type,
-               summary, tags, flagged_for_deletion, saved_at,
-               time_estimate, estimate_reasoning
+        SELECT {_ITEM_COLS}
         FROM saved_items {where}
         ORDER BY saved_at DESC NULLS LAST
         LIMIT %s OFFSET %s
@@ -62,24 +94,12 @@ async def list_items(
         await cur.execute(data_sql, params + [limit, offset])
         rows = await cur.fetchall()
 
-    items = [
-        ItemResponse(
-            id=r[0],
-            title=r[1],
-            uri=r[2],
-            body=r[3],
-            source_context=r[4],
-            type=r[5],
-            summary=r[6],
-            tags=r[7] or [],
-            flagged_for_deletion=r[8] or False,
-            saved_at=r[9],
-            time_estimate=r[10],
-            estimate_reasoning=r[11],
-        )
-        for r in rows
-    ]
-    return ItemsResponse(items=items, total=total, limit=limit, offset=offset)
+    return ItemsResponse(
+        items=[_row_to_item(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/api/source_contexts")
@@ -94,6 +114,66 @@ async def list_source_contexts(
         )
         rows = await cur.fetchall()
     return [r[0] for r in rows]
+
+
+@router.get("/api/content_types")
+async def list_content_types(
+    db=Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    """Return distinct content_type values that actually exist in the database."""
+    async with db.cursor() as cur:
+        await cur.execute(
+            "SELECT DISTINCT content_type FROM saved_items"
+            " WHERE content_type IS NOT NULL AND deleted_at IS NULL ORDER BY content_type"
+        )
+        rows = await cur.fetchall()
+    return [r[0] for r in rows]
+
+
+@router.get("/api/items/export", response_model=list[ItemResponse])
+async def export_items(
+    content_type: Optional[str] = None,
+    tags: list[str] = Query(default=[]),
+    source_context: Optional[str] = None,
+    limit: int = Query(default=200, le=500),
+    db=Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    """Flat item list optimised for LLM consumption — no pagination envelope.
+
+    Omits flagged and deleted items. Typical use: pull all recipes to push to
+    Mealie, or pull all projects to compare against Gridstock inventory.
+    """
+    conditions: list[str] = [
+        "deleted_at IS NULL",
+        "flagged_for_deletion = FALSE",
+    ]
+    params: list = []
+
+    if content_type:
+        conditions.append("content_type = %s")
+        params.append(content_type)
+    if tags:
+        conditions.append("tags && %s::text[]")
+        params.append(tags)
+    if source_context:
+        conditions.append("source_context = %s")
+        params.append(source_context)
+
+    where = "WHERE " + " AND ".join(conditions)
+    sql = f"""
+        SELECT {_ITEM_COLS}
+        FROM saved_items {where}
+        ORDER BY saved_at DESC NULLS LAST
+        LIMIT %s
+    """
+
+    async with db.cursor() as cur:
+        await cur.execute(sql, params + [limit])
+        rows = await cur.fetchall()
+
+    return [_row_to_item(r) for r in rows]
 
 
 @router.patch("/api/items/{item_id}")
@@ -111,6 +191,9 @@ async def edit_item(
     if body.tags is not None:
         updates.append("tags = %s")
         params.append(body.tags)
+    if body.content_type is not None:
+        updates.append("content_type = %s")
+        params.append(body.content_type)
     if not updates:
         raise HTTPException(status_code=400, detail="Nothing to update")
     params.append(item_id)
@@ -202,10 +285,8 @@ async def suggest_items(
     """Return random items matching the requested time estimate."""
     async with db.cursor() as cur:
         await cur.execute(
-            """
-            SELECT id, title, uri, body, source_context, type,
-                   summary, tags, flagged_for_deletion, saved_at,
-                   time_estimate, estimate_reasoning
+            f"""
+            SELECT {_ITEM_COLS}
             FROM saved_items
             WHERE time_estimate = %s
               AND flagged_for_deletion = FALSE
@@ -217,20 +298,4 @@ async def suggest_items(
         )
         rows = await cur.fetchall()
 
-    return [
-        ItemResponse(
-            id=r[0],
-            title=r[1],
-            uri=r[2],
-            body=r[3],
-            source_context=r[4],
-            type=r[5],
-            summary=r[6],
-            tags=r[7] or [],
-            flagged_for_deletion=r[8] or False,
-            saved_at=r[9],
-            time_estimate=r[10],
-            estimate_reasoning=r[11],
-        )
-        for r in rows
-    ]
+    return [_row_to_item(r) for r in rows]

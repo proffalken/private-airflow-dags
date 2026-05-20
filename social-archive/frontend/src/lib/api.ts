@@ -11,7 +11,7 @@ export async function flagItem(id: number, flagged: boolean): Promise<void> {
 
 export async function editItem(
   id: number,
-  updates: { title?: string; tags?: string[] },
+  updates: { title?: string; tags?: string[]; content_type?: string | null },
 ): Promise<void> {
   const res = await fetch(`/api/items/${id}`, {
     method: 'PATCH',

@@ -62,7 +62,7 @@ from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import instrument_llm, parse_llm_json
+from dag_utils import instrument_llm, parse_llm_json, OLLAMA_BASE_URL, OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES
 
 logger = logging.getLogger("airflow.instagram_dag")
 
@@ -274,7 +274,7 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
-    client = OpenAI(base_url="http://ollama.ollama.svc.cluster.local:11434/v1", api_key="ollama")
+    client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
     hook = PostgresHook(postgres_conn_id="social_archive_db")
 
     with instrument_task_context({}) as span:
@@ -330,8 +330,8 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                                 )
 
                                 response = client.chat.completions.create(
-                                    model="dolphin-mistral:latest",
-                                    max_tokens=512,
+                                    model=OLLAMA_MODEL,
+                                    max_tokens=600,
                                     messages=[{
                                         "role": "user",
                                         "content": (
@@ -355,7 +355,8 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                                             f"  4. Add specific descriptive tags beyond "
                                             f"the broad category (e.g. 'chocolate', "
                                             f"'recipe', 'guitar', 'jazz').\n"
-                                            f'- "summary": a one-sentence summary\n\n'
+                                            f'- "summary": a one-sentence summary\n'
+                                            f"{CONTENT_TYPE_PROMPT_FRAGMENT}\n\n"
                                             f"{hashtag_hint}"
                                             f"Caption:\n{caption[:2000]}\n\n"
                                             f"Respond with only valid JSON, no trailing commas."
@@ -387,11 +388,14 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                             else:
                                 display_title = external_id
 
+                            raw_ct = analysis.get("content_type", "other")
+                            content_type = raw_ct if raw_ct in CONTENT_TYPES else "other"
+
                             cursor.execute("""
                                 INSERT INTO saved_items
                                     (source, external_id, type, title, body,
-                                     uri, source_context, tags, summary)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                     uri, source_context, tags, summary, content_type)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (source, external_id) DO NOTHING
                             """, (
                                 "instagram",
@@ -403,6 +407,7 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                                 collection_name,
                                 merged_tags,
                                 analysis.get("summary"),
+                                content_type,
                             ))
                             conn.commit()
                             inserted += cursor.rowcount

@@ -16,7 +16,7 @@ from airflow.traces.tracer import Trace
 import praw
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import get_llm_client, instrument_llm, instrument_requests, parse_llm_json, OLLAMA_MODEL
+from dag_utils import get_llm_client, instrument_llm, instrument_requests, parse_llm_json, OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES
 
 logger = logging.getLogger("airflow.reddit_dag")
 
@@ -165,16 +165,17 @@ def analyse_and_store(sorted_posts, ti):
 
                                 response = client.chat.completions.create(
                                     model=OLLAMA_MODEL,
-                                    max_tokens=512,
+                                    max_tokens=600,
                                     messages=[{
                                         "role": "user",
                                         "content": (
                                             f"Analyse this Reddit {item['type']} from r/{subreddit} "
                                             f"and return a JSON object with:\n"
                                             f'- "tags": a list of 3-8 relevant keyword tags (lowercase, no spaces)\n'
-                                            f'- "summary": a one-sentence summary\n\n'
+                                            f'- "summary": a one-sentence summary\n'
+                                            f"{CONTENT_TYPE_PROMPT_FRAGMENT}\n\n"
                                             f"Content:\n{content}\n\n"
-                                            f"Respond with only valid JSON."
+                                            f"Respond with only valid JSON, no trailing commas."
                                         ),
                                     }],
                                 )
@@ -184,10 +185,14 @@ def analyse_and_store(sorted_posts, ti):
 
                                 llm_span.set_attribute("item.tags", str(analysis.get("tags", [])))
 
+                            raw_ct = analysis.get("content_type", "other")
+                            content_type = raw_ct if raw_ct in CONTENT_TYPES else "other"
+
                             cursor.execute("""
                                 INSERT INTO saved_items
-                                    (source, external_id, type, title, body, uri, source_context, tags, summary)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    (source, external_id, type, title, body, uri,
+                                     source_context, tags, summary, content_type)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (source, external_id) DO NOTHING
                             """, (
                                 "reddit",
@@ -199,6 +204,7 @@ def analyse_and_store(sorted_posts, ti):
                                 subreddit,
                                 analysis.get("tags", []),
                                 analysis.get("summary"),
+                                content_type,
                             ))
                             conn.commit()
                             inserted += cursor.rowcount
