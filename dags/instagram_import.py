@@ -1,7 +1,22 @@
+"""
+instagram_import — hourly DAG that imports, analyses, and enriches Instagram saves.
+
+Runs every hour but only performs the full import when a weekly scheduled slot is due
+(two random slots per week, between 08:00–21:59 UTC, at least 24 h apart). This avoids
+hammering the Instagram API while still running regularly enough to be timely.
+
+Full pipeline per run:
+  1. check_schedule_and_fetch — verify a slot is due, then fetch saved collections
+  2. analyse_and_store        — LLM tag/summary/classify, upsert to saved_items
+  3. warm_up_model            — pull Ollama model if not cached
+  4. estimate_time            — LLM time estimation for newly stored items
+  5. extract_structure        — LLM recipe/project extraction for newly stored items
+"""
 from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 
 import pendulum
@@ -30,18 +45,12 @@ def _safe_extract_resource_v1(data):
         )[-1]["url"]
         return _ig_extractors.Resource(**data)
     else:
-        # No thumbnail available (Reels/newer format in carousel) — use
-        # model_construct to bypass Pydantic URL validation. We don't use
-        # carousel resource thumbnails anywhere, so this is safe.
         data["thumbnail_url"] = None
         return _ig_extractors.Resource.model_construct(**data)
 
 
 _ig_extractors.extract_resource_v1 = _safe_extract_resource_v1
 
-# Patch 2: extract_media_v1 crashes when the API omits the `code` field
-# (shortcode). collection.py imports extract_media_v1 directly via
-# `from ... import`, so we must patch it in that module's namespace.
 from instagrapi.mixins import collection as _ig_collection
 _orig_extract_media_v1 = _ig_collection.extract_media_v1
 
@@ -62,22 +71,77 @@ from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import instrument_llm, parse_llm_json, OLLAMA_BASE_URL, OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES
+from dag_utils import (
+    instrument_llm, parse_llm_json,
+    OLLAMA_BASE_URL, OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES,
+    warm_up_ollama, run_estimate_items, run_extract_structure,
+)
 
 logger = logging.getLogger("airflow.instagram_dag")
 
 _MEDIA_TYPE_NAMES = {1: "photo", 2: "video", 8: "album"}
+_SCHEDULE_VARIABLE = "INSTAGRAM_SCHEDULE"
+_MIN_GAP_HOURS = 24
+_EARLIEST_HOUR = 8
+_LATEST_HOUR = 21
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _week_key(dt: pendulum.DateTime) -> str:
+    iso = dt.isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def _get_or_create_schedule(now: pendulum.DateTime, current: dict) -> dict:
+    key = _week_key(now)
+    if current.get("week") == key:
+        return current
+
+    monday = now.start_of("week")
+    slots: list[pendulum.DateTime] = []
+    attempts = 0
+    while len(slots) < 2 and attempts < 500:
+        attempts += 1
+        candidate = monday.add(days=random.randint(0, 6)).set(
+            hour=random.randint(_EARLIEST_HOUR, _LATEST_HOUR),
+            minute=random.randint(0, 59),
+            second=0,
+            microsecond=0,
+        )
+        if all(abs((candidate - s).total_seconds()) >= _MIN_GAP_HOURS * 3600 for s in slots):
+            slots.append(candidate)
+
+    new_schedule = {
+        "week": key,
+        "slots": [s.isoformat() for s in slots],
+        "triggered": [],
+    }
+    logger.info("New week %s: Instagram runs scheduled at %s", key, new_schedule["slots"])
+    return new_schedule
+
+
+def _check_trigger_window(now: pendulum.DateTime, schedule: dict) -> tuple[bool, dict]:
+    triggered_set = set(schedule.get("triggered", []))
+    hour_start = now.start_of("hour")
+    hour_end = hour_start.add(hours=1)
+
+    for slot_str in schedule.get("slots", []):
+        if slot_str in triggered_set:
+            continue
+        if hour_start <= pendulum.parse(slot_str) < hour_end:
+            triggered_set.add(slot_str)
+            return True, {**schedule, "triggered": list(triggered_set)}
+
+    return False, schedule
 
 
 def get_instagram_client() -> Client:
-    """Return an authenticated instagrapi Client, reusing a saved session where possible.
-
-    Loads the stored session and returns immediately without making any
-    verification API call. If the session has expired the real API calls in
-    the task will raise LoginRequired, which is handled there.
-    """
+    """Return an authenticated instagrapi Client, reusing a saved session where possible."""
     cl = Client()
-    cl.delay_range = [1, 3]  # random delay between API calls to avoid rate-limiting
+    cl.delay_range = [1, 3]
 
     session_str = Variable.get("INSTAGRAM_SESSION", default="")
     if session_str:
@@ -99,13 +163,11 @@ def get_instagram_client() -> Client:
             "Variables and clear INSTAGRAM_SESSION if it is stale"
         ) from exc
 
-    # Persist the updated session (device fingerprint + cookies) for next run
     Variable.set("INSTAGRAM_SESSION", json.dumps(cl.get_settings()))
     return cl
 
 
 def extract_hashtags(caption: str | None) -> list[str]:
-    """Return lowercase hashtags found in the caption, without the # prefix."""
     if not caption:
         return []
     return [tag.lower() for tag in re.findall(r"#(\w+)", caption)]
@@ -116,18 +178,27 @@ def extract_hashtags(caption: str | None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 @task
-def get_saved_posts(ti) -> dict[str, list[dict]]:
-    """Fetch saved Instagram media from all collections plus any uncollected saves.
+def check_schedule_and_fetch(ti) -> dict[str, list[dict]]:
+    """Check weekly schedule; skip if not due. If due, fetch saved collections."""
+    now = pendulum.now("UTC")
 
-    Returns a dict keyed by collection name (or "Saved" for uncollected items),
-    each value being a list of media dicts ready for analysis and storage.
-    """
-    logger.info("=" * 80)
-    logger.info(f"Getting Instagram saved posts — DAG: {ti.dag_id}, Run: {ti.run_id}")
+    try:
+        current = json.loads(Variable.get(_SCHEDULE_VARIABLE, default="{}"))
+    except (json.JSONDecodeError, ValueError):
+        current = {}
+
+    schedule = _get_or_create_schedule(now, current)
+    should_trigger, schedule = _check_trigger_window(now, schedule)
+    Variable.set(_SCHEDULE_VARIABLE, json.dumps(schedule))
+
+    if not should_trigger:
+        logger.info("No Instagram run scheduled this hour — skipping")
+        raise AirflowSkipException("No Instagram run scheduled this hour")
+
+    logger.info("Instagram slot is due — fetching saved collections")
 
     otel_task_tracer = otel_tracer.get_otel_tracer_for_task(Trace)
 
-    # Fetch already-known IDs to skip re-processing
     try:
         hook = PostgresHook(postgres_conn_id="social_archive_db")
         rows = hook.get_records(
@@ -157,9 +228,6 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
             collections = cl.collections()
             logger.info(f"Found {len(collections)} Instagram collections")
 
-            # Separate auto-collections (e.g. "All posts") from user-created ones.
-            # ALL_MEDIA_AUTO_COLLECTION contains every saved item; we use it at the
-            # end to catch anything not in a named collection.
             all_posts_collection = None
             named_collections = []
             for c in collections:
@@ -168,7 +236,6 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
                 else:
                     named_collections.append(c)
 
-            # Process user-created named collections first
             for collection in named_collections:
                 collection_name = collection.name
                 logger.info(f"Fetching collection: {collection_name!r} (id={collection.id})")
@@ -190,7 +257,6 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
                 for media in medias:
                     pk_str = str(media.pk)
                     seen_pks.add(pk_str)
-
                     if pk_str in known_ids:
                         continue
 
@@ -208,8 +274,6 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
                     })
                     new_count += 1
 
-        # Use the "All posts" auto-collection to pick up saves not in any
-        # named collection (source_context = "Saved")
         uncollected_count = 0
         if all_posts_collection:
             with otel_task_tracer.start_child_span(span_name="fetch_uncollected_saves"):
@@ -224,11 +288,9 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
 
                 for media in medias:
                     pk_str = str(media.pk)
-
                     if pk_str in seen_pks:
-                        continue  # already captured under a named collection
+                        continue
                     seen_pks.add(pk_str)
-
                     if pk_str in known_ids:
                         continue
 
@@ -256,14 +318,8 @@ def get_saved_posts(ti) -> dict[str, list[dict]]:
 
 
 @task
-def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
-    """Analyse each Instagram item with the LLM to enhance hashtag-derived tags,
-    then store results in the archive database.
-
-    Tags are seeded from caption hashtags; the LLM is asked to augment and
-    add any missing relevant tags, then generate a one-sentence summary.
-    The final tag list is the deduplicated union of both sources.
-    """
+def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> list[int]:
+    """LLM-analyse each Instagram item and store in archive DB. Returns inserted item IDs."""
     logger.info("=" * 80)
     logger.info(f"Analysing and storing — DAG: {ti.dag_id}, Run: {ti.run_id}")
 
@@ -276,6 +332,7 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
 
     client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
     hook = PostgresHook(postgres_conn_id="social_archive_db")
+    inserted_ids: list[int] = []
 
     with instrument_task_context({}) as span:
         instrument_llm()
@@ -301,7 +358,6 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                     """)
                     conn.commit()
 
-                inserted = 0
                 with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as insert_span:
                     for collection_name, items in sorted_posts.items():
                         for item in items:
@@ -367,17 +423,12 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                                 raw = response.choices[0].message.content or ""
                                 analysis = parse_llm_json(raw, external_id)
 
-                            # Merge caption hashtags with LLM tags, deduplicated
                             llm_tags = analysis.get("tags", [])
                             merged_tags = list(
                                 dict.fromkeys(caption_hashtags + llm_tags)
                             )
-
                             llm_span.set_attribute("item.tags", str(merged_tags))
 
-                            # Derive a display title so the item is always
-                            # clickable in the frontend: prefer LLM summary,
-                            # fall back to truncated caption.
                             llm_summary = analysis.get("summary") or ""
                             if llm_summary:
                                 display_title = llm_summary
@@ -397,6 +448,7 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                                      uri, source_context, tags, summary, content_type)
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (source, external_id) DO NOTHING
+                                RETURNING id
                             """, (
                                 "instagram",
                                 external_id,
@@ -410,16 +462,40 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
                                 content_type,
                             ))
                             conn.commit()
-                            inserted += cursor.rowcount
-                            logger.info(
-                                f"=== Stored {external_id} "
-                                f"tags={merged_tags} ({inserted} total)"
-                            )
+                            row = cursor.fetchone()
+                            if row:
+                                inserted_ids.append(row[0])
+                                logger.info(
+                                    f"=== Stored {external_id} tags={merged_tags} (id={row[0]})"
+                                )
 
-                    insert_span.set_attribute("items.inserted", inserted)
-                    logger.info(f"=== Finished — {inserted} items stored")
+                    insert_span.set_attribute("items.inserted", len(inserted_ids))
+                    logger.info(f"=== Finished — {len(inserted_ids)} items stored")
 
     logger.info("=" * 80)
+    return inserted_ids
+
+
+@task
+def warm_up_model(new_ids: list[int]) -> list[int]:
+    """Warm up Ollama before LLM processing tasks. Pass-through for new item IDs."""
+    if not new_ids:
+        logger.info("No new items — skipping model warm-up.")
+        return []
+    warm_up_ollama()
+    return new_ids
+
+
+@task
+def estimate_time(new_ids: list[int]) -> list[dict]:
+    """Estimate build effort for newly-imported Instagram items."""
+    return run_estimate_items(new_ids, "instagram")
+
+
+@task
+def extract_structure(new_ids: list[int]) -> list[dict]:
+    """Extract structured data for recipe/project Instagram items."""
+    return run_extract_structure(new_ids, "instagram")
 
 
 # ---------------------------------------------------------------------------
@@ -427,13 +503,16 @@ def analyse_and_store(sorted_posts: dict[str, list[dict]], ti) -> None:
 # ---------------------------------------------------------------------------
 
 @dag(
-    schedule=None,  # triggered exclusively by instagram_scheduler
+    schedule="0 * * * *",   # hourly; check_schedule_and_fetch skips if no slot due
     start_date=pendulum.datetime(2025, 8, 30, tz="UTC"),
     catchup=False,
 )
 def instagram_import():
-    posts = get_saved_posts()
-    analyse_and_store(posts)
+    posts = check_schedule_and_fetch()
+    new_ids = analyse_and_store(posts)
+    warmed_ids = warm_up_model(new_ids)
+    estimate_time(warmed_ids)
+    extract_structure(warmed_ids)
 
 
 instagram_import()

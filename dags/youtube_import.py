@@ -10,7 +10,6 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
-
 from airflow.exceptions import AirflowSkipException
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import dag, task, Variable
@@ -18,7 +17,11 @@ from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import get_llm_client, instrument_llm, parse_llm_json, OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES
+from dag_utils import (
+    get_llm_client, instrument_llm, parse_llm_json,
+    OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES,
+    warm_up_ollama, run_estimate_items, run_extract_structure,
+)
 
 logger = logging.getLogger("airflow.youtube_dag")
 
@@ -47,10 +50,6 @@ def playlist_name_to_tag(name: str) -> str:
     tag = re.sub(r"[\s_]+", "-", tag)
     return re.sub(r"-+", "-", tag).strip("-")
 
-
-# ---------------------------------------------------------------------------
-# YouTube API helpers
-# ---------------------------------------------------------------------------
 
 def _fetch_all_playlist_items(youtube, playlist_id: str) -> list[str]:
     """Return all video IDs in a playlist, handling pagination."""
@@ -89,10 +88,6 @@ def _fetch_video_details(youtube, video_ids: list[str]) -> dict[str, dict]:
             details[item["id"]] = item["snippet"]
     return details
 
-
-# ---------------------------------------------------------------------------
-# Tasks
-# ---------------------------------------------------------------------------
 
 @task
 def get_playlist_videos(ti) -> dict[str, list[dict]]:
@@ -170,7 +165,6 @@ def get_playlist_videos(ti) -> dict[str, list[dict]]:
                     logger.warning(f"No snippet for video {video_id}, skipping")
                     continue
 
-                # YouTube's own tags — cap at 20 to keep merged tag list sane
                 yt_tags = [t.lower() for t in (snippet.get("tags") or [])][:20]
 
                 sorted_videos.setdefault(playlist_name, []).append({
@@ -192,14 +186,8 @@ def get_playlist_videos(ti) -> dict[str, list[dict]]:
 
 
 @task
-def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
-    """LLM-analyse each video and store in the archive DB.
-
-    Tag priority (deduplicated, in order):
-      1. Normalised playlist name  — always first, guaranteed present
-      2. YouTube's own video tags  — creator-supplied metadata
-      3. LLM-generated tags        — fills gaps, adds broader categories
-    """
+def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> list[int]:
+    """LLM-analyse each video and store in the archive DB. Returns inserted item IDs."""
     logger.info("=" * 80)
     logger.info(f"Analysing and storing YouTube videos — DAG: {ti.dag_id}, Run: {ti.run_id}")
 
@@ -212,6 +200,7 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
 
     client = get_llm_client()
     hook = PostgresHook(postgres_conn_id="social_archive_db")
+    inserted_ids: list[int] = []
 
     with instrument_task_context({}) as span:
         instrument_llm()
@@ -237,7 +226,6 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                     """)
                     conn.commit()
 
-                inserted = 0
                 with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as insert_span:
                     for playlist_name, items in sorted_videos.items():
                         playlist_tag = playlist_name_to_tag(playlist_name)
@@ -304,7 +292,6 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                                 analysis = parse_llm_json(raw, video_id)
 
                             llm_tags = analysis.get("tags", [])
-                            # playlist tag → YouTube's own tags → LLM tags (deduplicated)
                             merged_tags = list(dict.fromkeys(
                                 [playlist_tag] + youtube_tags + llm_tags
                             ))
@@ -319,6 +306,7 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                                      uri, source_context, tags, summary, content_type)
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (source, external_id) DO NOTHING
+                                RETURNING id
                             """, (
                                 "youtube",
                                 video_id,
@@ -332,21 +320,41 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
                                 content_type,
                             ))
                             conn.commit()
-                            inserted += cursor.rowcount
-                            logger.info(
-                                f"=== Stored {video_id} "
-                                f"tags={merged_tags} ({inserted} total)"
-                            )
+                            row = cursor.fetchone()
+                            if row:
+                                inserted_ids.append(row[0])
+                                logger.info(
+                                    f"=== Stored {video_id} tags={merged_tags} (id={row[0]})"
+                                )
 
-                    insert_span.set_attribute("items.inserted", inserted)
-                    logger.info(f"=== Finished — {inserted} items stored")
+                    insert_span.set_attribute("items.inserted", len(inserted_ids))
+                    logger.info(f"=== Finished — {len(inserted_ids)} items stored")
 
     logger.info("=" * 80)
+    return inserted_ids
 
 
-# ---------------------------------------------------------------------------
-# DAG
-# ---------------------------------------------------------------------------
+@task
+def warm_up_model(new_ids: list[int]) -> list[int]:
+    """Warm up Ollama before LLM processing tasks. Pass-through for new item IDs."""
+    if not new_ids:
+        logger.info("No new items — skipping model warm-up.")
+        return []
+    warm_up_ollama()
+    return new_ids
+
+
+@task
+def estimate_time(new_ids: list[int]) -> list[dict]:
+    """Estimate build effort for newly-imported YouTube items."""
+    return run_estimate_items(new_ids, "youtube")
+
+
+@task
+def extract_structure(new_ids: list[int]) -> list[dict]:
+    """Extract structured data for recipe/project YouTube items."""
+    return run_extract_structure(new_ids, "youtube")
+
 
 @dag(
     schedule=timedelta(hours=3),
@@ -355,7 +363,10 @@ def analyse_and_store(sorted_videos: dict[str, list[dict]], ti) -> None:
 )
 def youtube_import():
     videos = get_playlist_videos()
-    analyse_and_store(videos)
+    new_ids = analyse_and_store(videos)
+    warmed_ids = warm_up_model(new_ids)
+    estimate_time(warmed_ids)
+    extract_structure(warmed_ids)
 
 
 youtube_import()

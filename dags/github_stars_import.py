@@ -7,9 +7,6 @@ import re
 import pendulum
 import requests
 
-import requests
-
-
 from airflow.exceptions import AirflowSkipException
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import dag, task, Variable
@@ -17,14 +14,14 @@ from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import get_llm_client, instrument_llm, parse_llm_json, OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES
+from dag_utils import (
+    get_llm_client, instrument_llm, parse_llm_json,
+    OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES,
+    warm_up_ollama, run_estimate_items, run_extract_structure,
+)
 
 logger = logging.getLogger("airflow.github_stars_dag")
 
-
-# ---------------------------------------------------------------------------
-# GitHub API helpers
-# ---------------------------------------------------------------------------
 
 def _fetch_all_starred_repos(token: str) -> list[dict]:
     """Page through /user/starred and return all starred repo objects."""
@@ -48,7 +45,6 @@ def _fetch_all_starred_repos(token: str) -> list[dict]:
         logger.info(f"Fetched page {page}: {len(batch)} repos (total so far: {len(repos)})")
         page += 1
 
-        # Follow Link header for next page
         link_header = response.headers.get("Link", "")
         next_url = None
         for part in link_header.split(","):
@@ -61,16 +57,12 @@ def _fetch_all_starred_repos(token: str) -> list[dict]:
 
         if next_url:
             url = next_url
-            params = {}  # next URL already contains query params
+            params = {}
         else:
             break
 
     return repos
 
-
-# ---------------------------------------------------------------------------
-# Tasks
-# ---------------------------------------------------------------------------
 
 @task
 def get_starred_repos(ti) -> dict[str, list[dict]]:
@@ -139,14 +131,8 @@ def get_starred_repos(ti) -> dict[str, list[dict]]:
 
 
 @task
-def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
-    """LLM-analyse each repo and store in the archive DB.
-
-    Tag priority (deduplicated, in order):
-      1. Primary language  — always first, guaranteed present
-      2. GitHub topics     — owner-supplied metadata
-      3. LLM-generated tags — fills gaps, adds broader categories
-    """
+def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> list[int]:
+    """LLM-analyse each repo and store in the archive DB. Returns inserted item IDs."""
     logger.info("=" * 80)
     logger.info(f"Analysing and storing GitHub starred repos — DAG: {ti.dag_id}, Run: {ti.run_id}")
 
@@ -159,6 +145,7 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
 
     client = get_llm_client()
     hook = PostgresHook(postgres_conn_id="social_archive_db")
+    inserted_ids: list[int] = []
 
     with instrument_task_context({}) as span:
         instrument_llm()
@@ -184,7 +171,6 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                     """)
                     conn.commit()
 
-                inserted = 0
                 with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as insert_span:
                     for language, items in sorted_repos.items():
                         language_tag = language.lower().replace(" ", "-")
@@ -254,7 +240,6 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                                 analysis = parse_llm_json(raw, repo_id)
 
                             llm_tags = analysis.get("tags", [])
-                            # language tag → visibility → archived (if set) → GitHub topics → LLM tags (deduplicated)
                             status_tags = [visibility] + (["archived"] if is_archived else [])
                             merged_tags = list(dict.fromkeys(
                                 [language_tag] + status_tags + topics + llm_tags
@@ -270,6 +255,7 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                                      uri, source_context, tags, summary, content_type)
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (source, external_id) DO NOTHING
+                                RETURNING id
                             """, (
                                 "github",
                                 repo_id,
@@ -283,21 +269,41 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
                                 content_type,
                             ))
                             conn.commit()
-                            inserted += cursor.rowcount
-                            logger.info(
-                                f"=== Stored {full_name} "
-                                f"tags={merged_tags} ({inserted} total)"
-                            )
+                            row = cursor.fetchone()
+                            if row:
+                                inserted_ids.append(row[0])
+                                logger.info(
+                                    f"=== Stored {full_name} tags={merged_tags} (id={row[0]})"
+                                )
 
-                    insert_span.set_attribute("items.inserted", inserted)
-                    logger.info(f"=== Finished — {inserted} items stored")
+                    insert_span.set_attribute("items.inserted", len(inserted_ids))
+                    logger.info(f"=== Finished — {len(inserted_ids)} items stored")
 
     logger.info("=" * 80)
+    return inserted_ids
 
 
-# ---------------------------------------------------------------------------
-# DAG
-# ---------------------------------------------------------------------------
+@task
+def warm_up_model(new_ids: list[int]) -> list[int]:
+    """Warm up Ollama before LLM processing tasks. Pass-through for new item IDs."""
+    if not new_ids:
+        logger.info("No new items — skipping model warm-up.")
+        return []
+    warm_up_ollama()
+    return new_ids
+
+
+@task
+def estimate_time(new_ids: list[int]) -> list[dict]:
+    """Estimate build effort for newly-imported GitHub items."""
+    return run_estimate_items(new_ids, "github")
+
+
+@task
+def extract_structure(new_ids: list[int]) -> list[dict]:
+    """Extract structured data for recipe/project GitHub items."""
+    return run_extract_structure(new_ids, "github")
+
 
 @dag(
     schedule=timedelta(hours=3),
@@ -306,7 +312,10 @@ def analyse_and_store(sorted_repos: dict[str, list[dict]], ti) -> None:
 )
 def github_stars_import():
     repos = get_starred_repos()
-    analyse_and_store(repos)
+    new_ids = analyse_and_store(repos)
+    warmed_ids = warm_up_model(new_ids)
+    estimate_time(warmed_ids)
+    extract_structure(warmed_ids)
 
 
 github_stars_import()

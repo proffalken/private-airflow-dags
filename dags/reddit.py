@@ -2,23 +2,25 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
-import json
 
 import pendulum
-
+import praw
 
 from airflow.exceptions import AirflowSkipException
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.sdk import chain, dag, task, Variable
+from airflow.sdk import dag, task, Variable
 from airflow.traces import otel_tracer
 from airflow.traces.tracer import Trace
 
-import praw
-
 from airflow_otel import instrument_task_context, get_meter
-from dag_utils import get_llm_client, instrument_llm, instrument_requests, parse_llm_json, OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES
+from dag_utils import (
+    get_llm_client, instrument_llm, instrument_requests, parse_llm_json,
+    OLLAMA_MODEL, CONTENT_TYPE_PROMPT_FRAGMENT, CONTENT_TYPES,
+    warm_up_ollama, run_estimate_items, run_extract_structure,
+)
 
 logger = logging.getLogger("airflow.reddit_dag")
+
 
 @task
 def get_saved_posts(ti):
@@ -35,7 +37,6 @@ def get_saved_posts(ti):
         password=Variable.get("REDDIT_PASSWORD"),
     )
 
-    # Fetch already-known IDs so we only process new items
     try:
         hook = PostgresHook(postgres_conn_id="social_archive_db")
         rows = hook.get_records("SELECT external_id FROM saved_items WHERE source = 'reddit'")
@@ -105,7 +106,7 @@ def get_saved_posts(ti):
 
 
 @task
-def analyse_and_store(sorted_posts, ti):
+def analyse_and_store(sorted_posts, ti) -> list[int]:
     logger.info("=" * 80)
     logger.info(f"Analysing and storing posts - DAG: {ti.dag_id}, Run: {ti.run_id}")
 
@@ -118,6 +119,7 @@ def analyse_and_store(sorted_posts, ti):
 
     client = get_llm_client()
     hook = PostgresHook(postgres_conn_id="social_archive_db")
+    inserted_ids: list[int] = []
 
     with instrument_task_context({}) as span:
         instrument_requests()
@@ -150,7 +152,6 @@ def analyse_and_store(sorted_posts, ti):
                     """)
                     conn.commit()
 
-                inserted = 0
                 with otel_task_tracer.start_child_span(span_name="analyse_and_insert_items") as insert_span:
                     for subreddit, items in sorted_posts.items():
                         for item in items:
@@ -182,7 +183,6 @@ def analyse_and_store(sorted_posts, ti):
 
                                 raw = response.choices[0].message.content or ""
                                 analysis = parse_llm_json(raw, item["external_id"])
-
                                 llm_span.set_attribute("item.tags", str(analysis.get("tags", [])))
 
                             raw_ct = analysis.get("content_type", "other")
@@ -194,6 +194,7 @@ def analyse_and_store(sorted_posts, ti):
                                      source_context, tags, summary, content_type)
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ON CONFLICT (source, external_id) DO NOTHING
+                                RETURNING id
                             """, (
                                 "reddit",
                                 item["external_id"],
@@ -207,13 +208,38 @@ def analyse_and_store(sorted_posts, ti):
                                 content_type,
                             ))
                             conn.commit()
-                            inserted += cursor.rowcount
-                            logger.info(f"=== Stored item {item['external_id']} ({inserted} total)")
+                            row = cursor.fetchone()
+                            if row:
+                                inserted_ids.append(row[0])
+                                logger.info(f"=== Stored item {item['external_id']} (id={row[0]})")
 
-                    insert_span.set_attribute("items.inserted", inserted)
-                    logger.info(f"=== Finished — {inserted} items stored")
+                    insert_span.set_attribute("items.inserted", len(inserted_ids))
+                    logger.info(f"=== Finished — {len(inserted_ids)} items stored")
 
     logger.info("=" * 80)
+    return inserted_ids
+
+
+@task
+def warm_up_model(new_ids: list[int]) -> list[int]:
+    """Warm up Ollama before LLM processing tasks. Pass-through for new item IDs."""
+    if not new_ids:
+        logger.info("No new items — skipping model warm-up.")
+        return []
+    warm_up_ollama()
+    return new_ids
+
+
+@task
+def estimate_time(new_ids: list[int]) -> list[dict]:
+    """Estimate build effort for newly-imported Reddit items."""
+    return run_estimate_items(new_ids, "reddit")
+
+
+@task
+def extract_structure(new_ids: list[int]) -> list[dict]:
+    """Extract structured data for recipe/project Reddit items."""
+    return run_extract_structure(new_ids, "reddit")
 
 
 @dag(
@@ -223,7 +249,10 @@ def analyse_and_store(sorted_posts, ti):
 )
 def reddit_import():
     posts = get_saved_posts()
-    analyse_and_store(posts)
+    new_ids = analyse_and_store(posts)
+    warmed_ids = warm_up_model(new_ids)
+    estimate_time(warmed_ids)
+    extract_structure(warmed_ids)
 
 
 reddit_import()
