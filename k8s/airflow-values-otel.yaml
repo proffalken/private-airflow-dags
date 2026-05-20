@@ -12,6 +12,31 @@ env:
   - name: OTEL_EXPORTER_OTLP_ENDPOINT
     value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"
 
+# Inject connections and variables into every component globally.
+# In Airflow 3 the Task SDK routes Variable/Connection lookups through the
+# API server, so all secrets must be present there — not just on the workers.
+extraEnvFrom: |
+  - secretRef:
+      name: airflow-git-connection
+  - secretRef:
+      name: airflow-variables
+  - secretRef:
+      name: airflow-social-archive-db
+  - secretRef:
+      name: garage-s3-credentials
+
+# Mount the SSH private key at a fixed path so GitHook can use key_file.
+volumes:
+  - name: git-ssh-key
+    secret:
+      secretName: airflow-git-ssh-key
+      defaultMode: 0400
+
+volumeMounts:
+  - name: git-ssh-key
+    mountPath: /opt/airflow/secrets/git-ssh
+    readOnly: true
+
 workers:
   resources:
     requests:
