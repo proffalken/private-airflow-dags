@@ -38,7 +38,9 @@ RECIPE_PROMPT = """\
 You are a recipe data extractor. Given information about a saved recipe item, \
 extract structured data and return a JSON object only — no markdown, no explanation.
 
-Return exactly this structure (omit keys you cannot determine from the content):
+Be concise: list at most 15 ingredients and 10 steps. Omit keys you cannot determine.
+
+Return exactly this structure:
 {{
   "ingredients": ["<quantity> <ingredient>", ...],
   "steps": ["<step 1>", "<step 2>", ...],
@@ -62,7 +64,9 @@ You are a project materials extractor. Given information about a saved maker/bui
 project item, extract structured data and return a JSON object only — no markdown, \
 no explanation.
 
-Return exactly this structure (omit keys you cannot determine from the content):
+Be concise: list at most 15 materials and 8 tools. Omit keys you cannot determine.
+
+Return exactly this structure:
 {{
   "materials": ["<quantity> <material/component>", ...],
   "tools": ["<tool>", ...],
@@ -236,9 +240,9 @@ def structure_extractor():
                         try:
                             raw = ollama_chat(
                                 [{"role": "user", "content": prompt}],
-                                max_tokens=1024,
+                                max_tokens=2048,
                                 temperature=0.1,  # very low — we want consistent extraction
-                                timeout=90,
+                                timeout=120,
                             )
                             parsed = parse_llm_json(raw, str(item["id"]))
                         except Exception as exc:
