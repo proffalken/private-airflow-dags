@@ -29,6 +29,8 @@ interface Item {
   saved_at: string | null
   time_estimate: string | null
   estimate_reasoning: string | null
+  content_type: string | null
+  structured_data: Record<string, unknown> | null
 }
 
 export default function BuildPage() {
