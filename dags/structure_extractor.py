@@ -88,7 +88,7 @@ PROMPTS = {
 @dag(
     dag_id="structure_extractor",
     schedule="@weekly",
-    start_date=pendulum.datetime(2026, 5, 21, tz="UTC"),
+    start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
     tags=["social-archive", "llm"],
 )

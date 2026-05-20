@@ -60,7 +60,7 @@ URL: {uri}
 @dag(
     dag_id="content_type_backfill",
     schedule=None,  # trigger manually; leave in place as a safety-net catch-up
-    start_date=pendulum.datetime(2026, 5, 21, tz="UTC"),
+    start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
     tags=["social-archive", "llm", "backfill"],
 )
