@@ -1,4 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "fastmcp>=2.0",
+#   "httpx>=0.27",
+# ]
+# ///
 """
 Social Archive MCP server.
 
