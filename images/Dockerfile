@@ -22,4 +22,5 @@ RUN pip install --no-cache-dir \
     opentelemetry-instrumentation-openai-v2 \
     opentelemetry-instrumentation-requests \
     "apache-airflow-providers-amazon>=9.0.0" \
-    "pyarrow>=18.0"
+    "pyarrow>=18.0" \
+    trafilatura

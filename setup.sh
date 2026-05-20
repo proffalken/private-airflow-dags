@@ -12,6 +12,10 @@
 # Optional environment variables:
 #   AIRFLOW_GIT_SSH_KEY_FILE  - Path to SSH private key for Airflow git DAG bundle
 #                               (default: ~/.ssh/airflow)
+#   GARAGE_S3_ENDPOINT        - Garage S3 endpoint for bookmark_processor
+#                               (default: https://s3.wallace.network)
+#   GARAGE_S3_BUCKET          - Garage S3 bucket for bookmark_processor
+#                               (default: social-archive)
 #
 # Example:
 #   export DATABASE_URL='postgresql+psycopg://app:password@host:5432/social_archive'
@@ -88,6 +92,9 @@ kubectl create secret generic airflow-git-ssh-key -n airflow \
 : "${YOUTUBE_REFRESH_TOKEN:?YOUTUBE_REFRESH_TOKEN must be set}"
 : "${INSTAGRAM_USERNAME:?INSTAGRAM_USERNAME must be set}"
 : "${INSTAGRAM_PASSWORD:?INSTAGRAM_PASSWORD must be set}"
+# Optional — bookmark_processor uses these if set
+GARAGE_S3_ENDPOINT="${GARAGE_S3_ENDPOINT:-https://s3.wallace.network}"
+GARAGE_S3_BUCKET="${GARAGE_S3_BUCKET:-social-archive}"
 
 kubectl delete secret airflow-variables -n airflow --ignore-not-found
 kubectl create secret generic airflow-variables -n airflow \
@@ -100,6 +107,8 @@ kubectl create secret generic airflow-variables -n airflow \
   --from-literal=AIRFLOW_VAR_YOUTUBE_CLIENT_SECRET="${YOUTUBE_CLIENT_SECRET}" \
   --from-literal=AIRFLOW_VAR_YOUTUBE_REFRESH_TOKEN="${YOUTUBE_REFRESH_TOKEN}" \
   --from-literal=AIRFLOW_VAR_INSTAGRAM_USERNAME="${INSTAGRAM_USERNAME}" \
-  --from-literal=AIRFLOW_VAR_INSTAGRAM_PASSWORD="${INSTAGRAM_PASSWORD}"
+  --from-literal=AIRFLOW_VAR_INSTAGRAM_PASSWORD="${INSTAGRAM_PASSWORD}" \
+  --from-literal=AIRFLOW_VAR_GARAGE_S3_ENDPOINT="${GARAGE_S3_ENDPOINT}" \
+  --from-literal=AIRFLOW_VAR_GARAGE_S3_BUCKET="${GARAGE_S3_BUCKET}"
 
 echo "Secrets created. Run ./deploy.sh to apply the Helm upgrade."
