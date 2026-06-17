@@ -6,7 +6,7 @@ FROM apache/airflow:3.1.8
 # (Airflow's bundled version) while api jumps to 1.40.0 causes a strict version check
 # in the SDK to fail at import time, which cascades into an Airflow startup crash.
 RUN pip install --no-cache-dir \
-    airflow-otel \
+    "airflow-otel>=0.2.0" \
     praw \
     anthropic \
     openai \
