@@ -5,10 +5,6 @@
 #     -n airflow --version 1.19.0 --reuse-values \
 #     -f k8s/airflow-values-otel.yaml
 
-env:
-  - name: OTEL_EXPORTER_OTLP_ENDPOINT
-    value: "http://otel-collector-opentelemetry-collector.opentelemetry.svc.cluster.local:4318"
-
 # Inject connections and variables into every component globally.
 # In Airflow 3 the Task SDK routes Variable/Connection lookups through the
 # API server, so all secrets must be present there — not just on the workers.
