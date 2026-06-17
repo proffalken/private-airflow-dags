@@ -222,24 +222,24 @@ def analyse_and_store(sorted_posts, ti) -> list[int]:
 
 @task
 def warm_up_model(new_ids: list[int]) -> list[int]:
-    """Warm up Ollama before LLM processing tasks. Pass-through for new item IDs."""
     if not new_ids:
         logger.info("No new items — skipping model warm-up.")
         return []
-    warm_up_ollama()
+    with instrument_task_context({}):
+        warm_up_ollama()
     return new_ids
 
 
 @task
 def estimate_time(new_ids: list[int]) -> list[dict]:
-    """Estimate build effort for newly-imported Reddit items."""
-    return run_estimate_items(new_ids, "reddit")
+    with instrument_task_context({}):
+        return run_estimate_items(new_ids, "reddit")
 
 
 @task
 def extract_structure(new_ids: list[int]) -> list[dict]:
-    """Extract structured data for recipe/project Reddit items."""
-    return run_extract_structure(new_ids, "reddit")
+    with instrument_task_context({}):
+        return run_extract_structure(new_ids, "reddit")
 
 
 @dag(
