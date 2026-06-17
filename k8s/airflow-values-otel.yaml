@@ -1,7 +1,4 @@
 # Helm values override for the Airflow release.
-# Ensures OTEL_EXPORTER_OTLP_ENDPOINT is propagated to task worker subprocesses,
-# which run in a separate PID from the main Airflow worker and do not automatically
-# inherit all environment variables.
 #
 # Apply with:
 #   helm upgrade airflow apache-airflow/airflow \
@@ -10,7 +7,7 @@
 
 env:
   - name: OTEL_EXPORTER_OTLP_ENDPOINT
-    value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"
+    value: "http://otel-collector-opentelemetry-collector.opentelemetry.svc.cluster.local:4318"
 
 # Inject connections and variables into every component globally.
 # In Airflow 3 the Task SDK routes Variable/Connection lookups through the
@@ -46,15 +43,9 @@ workers:
       cpu: "2"
       memory: "1536Mi"
   env:
-    - name: OTEL_EXPORTER_OTLP_ENDPOINT
-      value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"
     - name: AIRFLOW_CONN_GARAGE_S3
       valueFrom:
         secretKeyRef:
           name: garage-s3-credentials
           key: AIRFLOW_CONN_GARAGE_S3
 
-triggerer:
-  env:
-    - name: OTEL_EXPORTER_OTLP_ENDPOINT
-      value: "http://dash0-operator-opentelemetry-collector-service.dash0-system.svc.cluster.local:4318"
