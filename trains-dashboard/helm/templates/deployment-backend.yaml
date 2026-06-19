@@ -16,6 +16,10 @@ spec:
       labels:
         {{- include "trains-dashboard.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: backend
+      {{- with .Values.backend.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
