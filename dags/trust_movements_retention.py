@@ -20,6 +20,7 @@ import pendulum
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import dag, task
+from airflow_otel import instrument_task_context, get_meter
 
 logger = logging.getLogger(__name__)
 
@@ -46,53 +47,65 @@ def trust_movements_retention():
     def prune_db() -> dict:
         """Drop old monthly partitions; delete old rows from the current partition."""
         cutoff = _cutoff()
-        pg = PostgresHook(postgres_conn_id="rail_network_db")
-        conn = pg.get_conn()
 
-        dropped = []
-        deleted_rows = 0
+        with instrument_task_context({"nrod.feed": "TRUST", "task": "prune_db"}):
+            meter = get_meter("trust.retention")
+            partitions_dropped = meter.create_counter(
+                "trust.retention.partitions_dropped", unit="1",
+                description="Monthly partitions dropped by retention",
+            )
+            rows_deleted = meter.create_counter(
+                "trust.retention.rows_deleted", unit="1",
+                description="Rows deleted by retention",
+            )
 
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT tablename FROM pg_tables
-                    WHERE tablename ~ '^train_movements_\\d{4}_\\d{2}$'
-                    ORDER BY tablename
-                """)
-                partitions = [row[0] for row in cur.fetchall()]
+            pg = PostgresHook(postgres_conn_id="rail_network_db")
+            conn = pg.get_conn()
 
-            for partition in partitions:
-                m = re.match(r"train_movements_(\d{4})_(\d{2})$", partition)
-                if not m:
-                    continue
-                year, month = int(m.group(1)), int(m.group(2))
-                # First day of the NEXT month = upper bound of partition range
-                if month == 12:
-                    month_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-                else:
-                    month_end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+            dropped = []
+            deleted_rows = 0
 
+            try:
                 with conn.cursor() as cur:
-                    if month_end <= cutoff:
-                        # Entire partition predates the cutoff — drop it wholesale
-                        cur.execute(f"DROP TABLE IF EXISTS {partition}")
-                        conn.commit()
-                        dropped.append(partition)
-                        logger.info("Dropped partition %s", partition)
+                    cur.execute("""
+                        SELECT tablename FROM pg_tables
+                        WHERE tablename ~ '^train_movements_\\d{4}_\\d{2}$'
+                        ORDER BY tablename
+                    """)
+                    partitions = [row[0] for row in cur.fetchall()]
+
+                for partition in partitions:
+                    m = re.match(r"train_movements_(\d{4})_(\d{2})$", partition)
+                    if not m:
+                        continue
+                    year, month = int(m.group(1)), int(m.group(2))
+                    if month == 12:
+                        month_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
                     else:
-                        # Partial month — delete old rows
-                        cur.execute(
-                            f"DELETE FROM {partition} WHERE msg_queue_ts < %s",
-                            (cutoff,),
-                        )
-                        deleted_rows += cur.rowcount
-                        conn.commit()
-                        logger.info(
-                            "Deleted %d rows from %s older than %s",
-                            cur.rowcount, partition, cutoff.isoformat(),
-                        )
-        finally:
-            conn.close()
+                        month_end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+
+                    with conn.cursor() as cur:
+                        if month_end <= cutoff:
+                            cur.execute(f"DROP TABLE IF EXISTS {partition}")
+                            conn.commit()
+                            dropped.append(partition)
+                            partitions_dropped.add(1, {"partition": partition})
+                            logger.info("Dropped partition %s", partition)
+                        else:
+                            cur.execute(
+                                f"DELETE FROM {partition} WHERE msg_queue_ts < %s",
+                                (cutoff,),
+                            )
+                            n = cur.rowcount
+                            deleted_rows += n
+                            conn.commit()
+                            rows_deleted.add(n, {"partition": partition})
+                            logger.info(
+                                "Deleted %d rows from %s older than %s",
+                                n, partition, cutoff.isoformat(),
+                            )
+            finally:
+                conn.close()
 
         logger.info(
             "DB prune complete: dropped=%s, deleted_rows=%d", dropped, deleted_rows
@@ -103,17 +116,18 @@ def trust_movements_retention():
     def prune_loaded_files() -> int:
         """Remove trust_loaded_files entries for data that no longer exists."""
         cutoff = _cutoff()
-        pg = PostgresHook(postgres_conn_id="rail_network_db")
-        conn = pg.get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM trust_loaded_files WHERE loaded_at < %s", (cutoff,)
-                )
-                deleted = cur.rowcount
-            conn.commit()
-        finally:
-            conn.close()
+        with instrument_task_context({"nrod.feed": "TRUST", "task": "prune_loaded_files"}):
+            pg = PostgresHook(postgres_conn_id="rail_network_db")
+            conn = pg.get_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM trust_loaded_files WHERE loaded_at < %s", (cutoff,)
+                    )
+                    deleted = cur.rowcount
+                conn.commit()
+            finally:
+                conn.close()
         logger.info("Removed %d trust_loaded_files entries", deleted)
         return deleted
 
@@ -121,34 +135,40 @@ def trust_movements_retention():
     def prune_s3_processed() -> int:
         """Delete processed/ S3 files whose date prefix is older than 48 hours."""
         cutoff = _cutoff()
-        s3 = S3Hook(aws_conn_id="garage_s3").get_conn()
-
-        to_delete = []
-        paginator = s3.get_paginator("list_objects_v2")
-        date_re = re.compile(r"date=(\d{4}-\d{2}-\d{2})/hour=(\d{2})/")
-
-        for page in paginator.paginate(
-            Bucket=STAGING_BUCKET, Prefix=f"processed/{S3_PREFIX}/"
-        ):
-            for obj in page.get("Contents", []):
-                m = date_re.search(obj["Key"])
-                if not m:
-                    continue
-                file_hour = datetime.strptime(
-                    f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H"
-                ).replace(tzinfo=timezone.utc)
-                if file_hour < cutoff:
-                    to_delete.append(obj["Key"])
-
-        # Batch-delete in chunks of 1000 (S3 API limit)
-        deleted = 0
-        for i in range(0, len(to_delete), 1000):
-            batch = to_delete[i : i + 1000]
-            s3.delete_objects(
-                Bucket=STAGING_BUCKET,
-                Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True},
+        with instrument_task_context({"nrod.feed": "TRUST", "task": "prune_s3_processed"}):
+            meter = get_meter("trust.retention")
+            s3_deleted_counter = meter.create_counter(
+                "trust.retention.s3_files_deleted", unit="1",
+                description="Processed S3 files deleted by retention",
             )
-            deleted += len(batch)
+
+            s3 = S3Hook(aws_conn_id="garage_s3").get_conn()
+            to_delete = []
+            paginator = s3.get_paginator("list_objects_v2")
+            date_re = re.compile(r"date=(\d{4}-\d{2}-\d{2})/hour=(\d{2})/")
+
+            for page in paginator.paginate(
+                Bucket=STAGING_BUCKET, Prefix=f"processed/{S3_PREFIX}/"
+            ):
+                for obj in page.get("Contents", []):
+                    m = date_re.search(obj["Key"])
+                    if not m:
+                        continue
+                    file_hour = datetime.strptime(
+                        f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H"
+                    ).replace(tzinfo=timezone.utc)
+                    if file_hour < cutoff:
+                        to_delete.append(obj["Key"])
+
+            deleted = 0
+            for i in range(0, len(to_delete), 1000):
+                batch = to_delete[i : i + 1000]
+                s3.delete_objects(
+                    Bucket=STAGING_BUCKET,
+                    Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True},
+                )
+                deleted += len(batch)
+                s3_deleted_counter.add(len(batch))
 
         logger.info("Deleted %d processed S3 files older than %s", deleted, cutoff.isoformat())
         return deleted
