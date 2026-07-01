@@ -179,7 +179,7 @@ def scrape_bodies(pending_ids: list[int], ti) -> list[int]:
                                 extractor.feed(html)
                                 body = extractor.get_text()
 
-                            body = body[:_SCRAPE_BODY_MAX].strip()
+                            body = body.replace('\x00', '')[:_SCRAPE_BODY_MAX].strip()
                         except _req.exceptions.HTTPError as exc:
                             status = exc.response.status_code if exc.response is not None else 0
                             if 400 <= status < 500:
